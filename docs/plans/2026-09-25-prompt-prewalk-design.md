@@ -125,9 +125,9 @@ Vitest + `@get-bb/plugin-sdk/testing`, TDD.
 ## Уточнения после сверки с SDK 0.5.9
 
 - Плагин лежит в `plugins/prompt-prewalk/`. Корень репозитория — коллекция плагинов с индексом `.bb/plugins.json`.
-- Scope `new-thread` несёт `projectId` (`null`, пока проект не выбран). Поддерживаем оба scope; при `null` кнопка неактивна.
-- Read-only режима нет. Worker запускается с самым строгим `permissionMode: "accept-edits"`. Если модель всё же попросит разрешение, запрос упрётся в таймаут, и worker остановится.
-- Окружение worker-а: в треде — `{ type: "reuse", environmentId }` этого треда, чтобы не плодить worktree; в новом треде — `project-default`.
+- Проект worker-у не нужен: тред пользователя нужен только для истории. Кнопка работает в треде и в новом треде, даже без выбранного проекта.
+- Read-only режима нет. Worker запускается с самым строгим `permissionMode: "accept-edits"` в изолированной папке, поэтому его правки не затрагивают репозиторий пользователя.
+- Worker изолирован: он запускается в личном проекте bb (`proj_personal`) с `environment: { type: "host", workspace: { type: "personal" } }` — пустой временной папкой, которую bb удаляет при архивации. В checkout пользователя worker не попадает, даже с `accept-edits`, который в Claude Code авто-одобряет правки файлов.
 - `threads.wait` бросает `ThreadWaitTimeoutError` и `ThreadWaitUnreachableError`. Они дают коды `timeout` и `worker_failed`.
 - `bb.sdk` недоступен во время загрузки плагина. Поэтому sweep сирот выполняется один раз перед первым `improve`. Сироты — скрытые неархивные треды с `originPluginId` плагина.
 - `useComposerView().draft` не содержит упоминаний. Их число даёт `richText.onDraftChange`. Вместо предупреждения кнопка неактивна, пока в черновике есть @-упоминания: пилюли не теряются молча.

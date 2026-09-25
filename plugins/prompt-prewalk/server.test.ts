@@ -4,7 +4,8 @@ import plugin from "./server";
 
 const SELECTION = { providerId: "claude-code", model: "claude-haiku-4-5", reasoningLevel: "low" } as const;
 const THREAD_INPUT = { requestId: "req-1", text: "fix the login bug", threadId: "thread-1" };
-const PROJECT_INPUT = { requestId: "req-1", text: "fix the login bug", projectId: "project-1" };
+const NEW_THREAD_INPUT = { requestId: "req-1", text: "fix the login bug" };
+const PERSONAL_WORKSPACE = { type: "host", workspace: { type: "personal" } };
 
 type HostOptions = NonNullable<Parameters<typeof createFakePluginHost>[0]>;
 type Harness = Awaited<ReturnType<typeof load>>;
@@ -24,7 +25,6 @@ function stubs() {
       }),
     },
     threads: {
-      get: async () => makeThreadResponse({ id: "thread-1", projectId: "project-1", environmentId: "env-1" }),
       timeline: async (): Promise<{ rows: unknown[] }> => ({ rows: [] }),
       list: async (): Promise<unknown[]> => [],
       spawn: async () => makeThreadResponse({ id: "worker-1", visibility: "hidden" }),
@@ -151,7 +151,7 @@ describe("improve", () => {
     expect(argsOf(harness, "threads.spawn")).toEqual([]);
   });
 
-  it("spawns a hidden worker in the thread's environment and returns the rewritten prompt", async () => {
+  it("spawns a hidden worker in an isolated personal workspace and returns the rewritten prompt", async () => {
     const harness = await loadWithModel();
     await expect(harness.callRpc("improve", THREAD_INPUT)).resolves.toEqual({
       ok: true,
@@ -159,15 +159,27 @@ describe("improve", () => {
     });
     const [spawn] = argsOf(harness, "threads.spawn");
     expect(spawn).toMatchObject({
-      projectId: "project-1",
-      environment: { type: "reuse", environmentId: "env-1" },
+      projectId: "proj_personal",
+      environment: PERSONAL_WORKSPACE,
       visibility: "hidden",
       permissionMode: "accept-edits",
       pluginMetadata: { prewalk: true },
       ...SELECTION,
     });
     expect(spawn).not.toHaveProperty("parentThreadId");
+    expect(argsOf(harness, "threads.get")).toEqual([]);
     expect(argsOf(harness, "threads.wait")).toEqual([{ threadId: "worker-1", status: "idle", timeoutMs: 120_000 }]);
+    expect(argsOf(harness, "threads.archive")).toEqual([{ threadId: "worker-1" }]);
+    expect(argsOf(harness, "threads.stop")).toEqual([{ threadId: "worker-1" }]);
+  });
+
+  it("passes timeoutSec and extraInstructions from settings", async () => {
+    const harness = await loadWithModel(stubs(), { timeoutSec: 30, extraInstructions: "Answer in English." });
+    await harness.callRpc("improve", THREAD_INPUT);
+    expect(argsOf(harness, "threads.wait")).toEqual([{ threadId: "worker-1", status: "idle", timeoutMs: 30_000 }]);
+    expect(argsOf(harness, "threads.spawn")[0]).toMatchObject({
+      prompt: expect.stringContaining("\nAnswer in English.\n"),
+    });
   });
 
   it("feeds recent thread history and the draft into the worker prompt", async () => {
@@ -191,22 +203,11 @@ describe("improve", () => {
     expect(argsOf(harness, "threads.timeline")).toEqual([]);
   });
 
-  it("uses the project default environment for a new thread", async () => {
+  it("runs a new-thread draft without history", async () => {
     const harness = await loadWithModel();
-    await harness.callRpc("improve", PROJECT_INPUT);
-    expect(argsOf(harness, "threads.spawn")[0]).toMatchObject({
-      projectId: "project-1",
-      environment: { type: "project-default" },
-    });
-    expect(argsOf(harness, "threads.get")).toEqual([]);
-  });
-
-  it("falls back to the project default environment when the thread has none", async () => {
-    const sdk = stubs();
-    sdk.threads.get = async () => makeThreadResponse({ id: "thread-1", projectId: "project-1", environmentId: null });
-    const harness = await loadWithModel(sdk);
-    await harness.callRpc("improve", THREAD_INPUT);
-    expect(argsOf(harness, "threads.spawn")[0]).toMatchObject({ environment: { type: "project-default" } });
+    await expect(harness.callRpc("improve", NEW_THREAD_INPUT)).resolves.toMatchObject({ ok: true });
+    expect(argsOf(harness, "threads.spawn")[0]).toMatchObject({ environment: PERSONAL_WORKSPACE });
+    expect(argsOf(harness, "threads.timeline")).toEqual([]);
   });
 
   it.each([
@@ -231,7 +232,22 @@ describe("improve", () => {
     expect(argsOf(harness, "threads.stop")).toEqual([{ threadId: "worker-1" }]);
   });
 
-  it("rejects input with both threadId and projectId", async () => {
+  it("keeps the result and still stops the worker when archive fails", async () => {
+    const sdk = stubs();
+    sdk.threads.archive = async () => Promise.reject(new Error("archive refused"));
+    const harness = await loadWithModel(sdk);
+    await expect(harness.callRpc("improve", THREAD_INPUT)).resolves.toEqual({
+      ok: true,
+      text: "Fix the login bug in auth.ts",
+    });
+    expect(argsOf(harness, "threads.stop")).toEqual([{ threadId: "worker-1" }]);
+    expect(harness.inspection.logEntries).toContainEqual({
+      level: "warn",
+      message: expect.stringContaining("archive refused"),
+    });
+  });
+
+  it("rejects unknown input keys", async () => {
     const harness = await loadWithModel();
     await expect(
       harness.callRpc("improve", { ...THREAD_INPUT, projectId: "project-1" }),

@@ -1,12 +1,6 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import {
-  buildWorkerPrompt,
-  collectHistory,
-  extractPrompt,
-  MAX_DRAFT_CHARS,
-  type HistoryMessage,
-} from "./worker";
+import { buildWorkerPrompt, collectHistory, extractPrompt, MAX_DRAFT_CHARS } from "./worker";
 
 const reasoningLevelSchema = z.enum(["none", "low", "medium", "high", "xhigh", "max", "ultra", "ultracode"]);
 
@@ -32,10 +26,7 @@ const draftFields = {
 
 export const rpcContract = defineRpcContract({
   improve: {
-    input: z.union([
-      z.object({ ...draftFields, threadId: z.string().min(1) }).strict(),
-      z.object({ ...draftFields, projectId: z.string().min(1) }).strict(),
-    ]),
+    input: z.object({ ...draftFields, threadId: z.string().min(1).optional() }).strict(),
     output: z.discriminatedUnion("ok", [
       z.object({ ok: z.literal(true), text: z.string() }),
       z.object({ ok: z.literal(false), code: improveErrorCodeSchema, message: z.string() }),
@@ -53,16 +44,10 @@ export const rpcContract = defineRpcContract({
 });
 
 const SELECTION_KEY = "selection";
+const PERSONAL_PROJECT_ID = "proj_personal";
 
 type ImproveInput = z.infer<(typeof rpcContract)["improve"]["input"]>;
 type ImproveResult = z.infer<(typeof rpcContract)["improve"]["output"]>;
-type SpawnArgs = Parameters<BbPluginApi["sdk"]["threads"]["spawn"]>[0];
-
-interface WorkerTarget {
-  projectId: string;
-  environment: SpawnArgs["environment"];
-  history: HistoryMessage[];
-}
 
 const fail = (code: ImproveErrorCode, message: string): ImproveResult => ({ ok: false, code, message });
 
@@ -136,25 +121,6 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       .catch((error: unknown) => bb.log.warn(`stop ${threadId} failed: ${errorMessage(error)}`));
   }
 
-  async function resolveTarget(input: ImproveInput, historyMessages: number): Promise<WorkerTarget> {
-    if (!("threadId" in input)) {
-      return { projectId: input.projectId, environment: { type: "project-default" }, history: [] };
-    }
-    const thread = await bb.sdk.threads.get({ threadId: input.threadId });
-    const history =
-      historyMessages > 0
-        ? collectHistory((await bb.sdk.threads.timeline({ threadId: input.threadId })).rows, historyMessages)
-        : [];
-    return {
-      projectId: thread.projectId,
-      environment:
-        thread.environmentId === null
-          ? { type: "project-default" }
-          : { type: "reuse", environmentId: thread.environmentId },
-      history,
-    };
-  }
-
   async function awaitWorker(workerId: string, timeoutSec: number): Promise<ImproveResult> {
     try {
       await bb.sdk.threads.wait({ threadId: workerId, status: "idle", timeoutMs: timeoutSec * 1000 });
@@ -176,11 +142,14 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     const selection = await readSelection();
     if (selection === null) return fail("no_model", "Choose a pre-walk model in the Prompt Prewalk settings.");
     const { historyMessages, timeoutSec, extraInstructions } = await settings.get();
-    const target = await resolveTarget(input, historyMessages);
+    const history =
+      input.threadId !== undefined && historyMessages > 0
+        ? collectHistory((await bb.sdk.threads.timeline({ threadId: input.threadId })).rows, historyMessages)
+        : [];
     const worker = await bb.sdk.threads.spawn({
-      projectId: target.projectId,
-      environment: target.environment,
-      prompt: buildWorkerPrompt({ draft: input.text, history: target.history, extraInstructions }),
+      projectId: PERSONAL_PROJECT_ID,
+      environment: { type: "host", workspace: { type: "personal" } },
+      prompt: buildWorkerPrompt({ draft: input.text, history, extraInstructions }),
       title: "Prompt pre-walk",
       visibility: "hidden",
       permissionMode: "accept-edits",
