@@ -419,4 +419,17 @@ describe("orphan sweep", () => {
       expect.objectContaining({ level: "warn", message: expect.stringContaining("list down") }),
     );
   });
+
+  it("sweeps once for concurrent first requests, so it never sees their own workers", async () => {
+    const listed = deferred<unknown[]>();
+    const sdk = stubs();
+    sdk.threads.list = () => listed.promise;
+    const harness = await loadWithModel(sdk);
+    const first = harness.callRpc("improve", THREAD_INPUT);
+    const second = harness.callRpc("improve", { ...THREAD_INPUT, requestId: "req-2" });
+    await vi.waitFor(() => expect(argsOf(harness, "threads.list")).toHaveLength(1));
+    listed.resolve([]);
+    await expect(Promise.all([first, second])).resolves.toMatchObject([{ ok: true }, { ok: true }]);
+    expect(argsOf(harness, "threads.list")).toHaveLength(1);
+  });
 });
