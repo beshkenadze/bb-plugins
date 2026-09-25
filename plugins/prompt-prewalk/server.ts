@@ -147,11 +147,11 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   }
 
   async function improve(input: ImproveInput): Promise<ImproveResult> {
-    const selection = await readSelection();
-    if (selection === null) return fail("no_model", "Choose a pre-walk model in the Prompt Prewalk settings.");
     const request: ActiveRequest = { workerId: null, cancelled: false };
     active.set(input.requestId, request);
     try {
+      const selection = await readSelection();
+      if (selection === null) return fail("no_model", "Choose a pre-walk model in the Prompt Prewalk settings.");
       const { historyMessages, timeoutSec, extraInstructions } = await settings.get();
       const history =
         input.threadId !== undefined && historyMessages > 0
@@ -170,13 +170,13 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       });
       request.workerId = worker.id;
       if (request.cancelled) return CANCELLED;
-      const result = await awaitWorker(worker.id, timeoutSec).catch((error: unknown) => {
-        if (request.cancelled) return CANCELLED;
-        throw error;
-      });
+      const result = await awaitWorker(worker.id, timeoutSec);
       return request.cancelled ? CANCELLED : result;
+    } catch (error) {
+      if (request.cancelled) return CANCELLED;
+      throw error;
     } finally {
-      active.delete(input.requestId);
+      if (active.get(input.requestId) === request) active.delete(input.requestId);
       if (request.workerId !== null) await disposeWorker(request.workerId);
     }
   }

@@ -948,7 +948,7 @@ const CANCELLED = fail("cancelled", "Pre-walk cancelled.");
   });
 ```
 
-`request.workerId = null` не даёт `finally` в `improve` обратиться к `bb` после dispose, когда handle уже отравлен.
+`request.workerId = null` не даёт `finally` в `improve` повторно освобождать уже освобождённый worker. Если dispose пришёлся на момент, когда `spawn` ещё в полёте, worker освободит `finally` во время drain хоста (до 5 с) или sweep из задачи 6 при следующей загрузке.
 
 **Step 4: Run — expect PASS**
 

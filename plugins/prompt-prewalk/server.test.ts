@@ -60,6 +60,16 @@ function namedError(name: string): Error {
   return error;
 }
 
+function deferred<T>() {
+  let resolve: (value: T) => void = () => {};
+  let reject: (reason: Error) => void = () => {};
+  const promise = new Promise<T>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("getModel / setModel", () => {
   it("offers the default model of the first available provider until one is saved", async () => {
     const harness = await load();
@@ -280,6 +290,14 @@ describe("cancel and dispose", () => {
     return sdk;
   }
 
+  async function cancelWhileBlocked(harness: Harness, path: string, release: () => void) {
+    const pending = harness.callRpc("improve", THREAD_INPUT);
+    await vi.waitFor(() => expect(argsOf(harness, path)).toHaveLength(1));
+    await expect(harness.callRpc("cancel", { requestId: "req-1" })).resolves.toEqual({ cancelled: true });
+    release();
+    return pending;
+  }
+
   it("stops the worker and resolves the request as cancelled", async () => {
     const harness = await loadWithModel(blockingStubs());
     const pending = harness.callRpc("improve", THREAD_INPUT);
@@ -289,6 +307,62 @@ describe("cancel and dispose", () => {
     expect(argsOf(harness, "threads.archive")).toEqual([{ threadId: "worker-1" }]);
   });
 
+  it("cancel issued right after improve still cancels it", async () => {
+    const harness = await loadWithModel();
+    const pending = harness.callRpc("improve", THREAD_INPUT);
+    const cancelled = harness.callRpc("cancel", { requestId: "req-1" });
+    await expect(cancelled).resolves.toEqual({ cancelled: true });
+    await expect(pending).resolves.toMatchObject({ ok: false, code: "cancelled" });
+    expect(argsOf(harness, "threads.spawn")).toEqual([]);
+  });
+
+  it("a finished request does not unregister a newer one with the same id", async () => {
+    const sdk = blockingStubs();
+    sdk.threads.timeline = async () => Promise.reject(new Error("timeline down"));
+    const harness = await loadWithModel(sdk);
+    const first = harness.callRpc("improve", { ...THREAD_INPUT, requestId: "dup" });
+    const second = harness.callRpc("improve", { ...NEW_THREAD_INPUT, requestId: "dup" });
+    await expect(first).rejects.toThrow("timeline down");
+    await expect(harness.callRpc("cancel", { requestId: "dup" })).resolves.toEqual({ cancelled: true });
+    await expect(second).resolves.toMatchObject({ ok: false, code: "cancelled" });
+  });
+
+  it("an error after cancel resolves as cancelled", async () => {
+    const spawn = deferred<ReturnType<typeof makeThreadResponse>>();
+    const sdk = stubs();
+    sdk.threads.spawn = () => spawn.promise;
+    const harness = await loadWithModel(sdk);
+    await expect(
+      cancelWhileBlocked(harness, "threads.spawn", () => spawn.reject(new Error("spawn failed"))),
+    ).resolves.toMatchObject({ ok: false, code: "cancelled" });
+  });
+
+  it("cancel while spawn is in flight stops the late worker without waiting", async () => {
+    const spawn = deferred<ReturnType<typeof makeThreadResponse>>();
+    const sdk = stubs();
+    sdk.threads.spawn = () => spawn.promise;
+    const harness = await loadWithModel(sdk);
+    await expect(
+      cancelWhileBlocked(harness, "threads.spawn", () =>
+        spawn.resolve(makeThreadResponse({ id: "worker-1", visibility: "hidden" })),
+      ),
+    ).resolves.toMatchObject({ ok: false, code: "cancelled" });
+    expect(argsOf(harness, "threads.wait")).toEqual([]);
+    expect(argsOf(harness, "threads.archive")).toEqual([{ threadId: "worker-1" }]);
+    expect(argsOf(harness, "threads.stop")).toEqual([{ threadId: "worker-1" }]);
+  });
+
+  it("cancel while reading history skips the spawn", async () => {
+    const timeline = deferred<{ rows: unknown[] }>();
+    const sdk = stubs();
+    sdk.threads.timeline = () => timeline.promise;
+    const harness = await loadWithModel(sdk);
+    await expect(
+      cancelWhileBlocked(harness, "threads.timeline", () => timeline.resolve({ rows: [] })),
+    ).resolves.toMatchObject({ ok: false, code: "cancelled" });
+    expect(argsOf(harness, "threads.spawn")).toEqual([]);
+  });
+
   it("treats cancel of an unknown request as a no-op", async () => {
     const harness = await loadWithModel();
     await expect(harness.callRpc("cancel", { requestId: "nope" })).resolves.toEqual({ cancelled: false });
@@ -296,10 +370,11 @@ describe("cancel and dispose", () => {
 
   it("stops in-flight workers on dispose", async () => {
     const harness = await loadWithModel(blockingStubs());
-    const pending = harness.callRpc("improve", THREAD_INPUT).catch(() => undefined);
+    const pending = harness.callRpc("improve", THREAD_INPUT);
     await vi.waitFor(() => expect(argsOf(harness, "threads.wait")).toHaveLength(1));
     await harness.lifecycle.dispose();
     expect(argsOf(harness, "threads.stop")).toContainEqual({ threadId: "worker-1" });
-    await pending;
+    await expect(pending).resolves.toMatchObject({ ok: false, code: "cancelled" });
+    expect(argsOf(harness, "threads.archive")).toEqual([{ threadId: "worker-1" }]);
   });
 });
