@@ -81,6 +81,61 @@ describe("getModel / setModel", () => {
     await expect(harness.callRpc("getModel")).resolves.toEqual({ selection: null, saved: false });
   });
 
+  function withClaudeCatalog(claudeModels: () => Promise<{ models: never[] }>) {
+    const sdk = stubs();
+    sdk.providers.list = async () => [
+      { id: "claude-code", available: true },
+      { id: "codex", available: true },
+    ];
+    sdk.providers.models = async (args?: { providerId?: string }) =>
+      args?.providerId === "claude-code"
+        ? claudeModels()
+        : { models: [{ model: "gpt-5.5", isDefault: true, defaultReasoningEffort: "medium" }] };
+    return sdk;
+  }
+
+  const CODEX_DEFAULT = {
+    selection: { providerId: "codex", model: "gpt-5.5", reasoningLevel: "medium" },
+    saved: false,
+  };
+
+  it("skips an available provider with an empty catalog", async () => {
+    const harness = await load(withClaudeCatalog(async () => ({ models: [] })));
+    await expect(harness.callRpc("getModel")).resolves.toEqual(CODEX_DEFAULT);
+    expect(argsOf(harness, "providers.models")).toEqual([{ providerId: "claude-code" }, { providerId: "codex" }]);
+  });
+
+  it("skips and logs a provider whose catalog call fails", async () => {
+    const harness = await load(withClaudeCatalog(() => Promise.reject(new Error("auth required"))));
+    await expect(harness.callRpc("getModel")).resolves.toEqual(CODEX_DEFAULT);
+    expect(harness.inspection.logEntries).toContainEqual({
+      level: "warn",
+      message: expect.stringContaining("auth required"),
+    });
+  });
+
+  it("falls back to the first model when the catalog has no default", async () => {
+    const sdk = stubs();
+    sdk.providers.models = async () => ({
+      models: [
+        { model: "claude-sonnet-5", isDefault: false, defaultReasoningEffort: "high" },
+        { model: "claude-haiku-4-5", isDefault: false, defaultReasoningEffort: "low" },
+      ],
+    });
+    const harness = await load(sdk);
+    await expect(harness.callRpc("getModel")).resolves.toEqual({
+      selection: { providerId: "claude-code", model: "claude-sonnet-5", reasoningLevel: "high" },
+      saved: false,
+    });
+  });
+
+  it("keeps the picker's service tier", async () => {
+    const harness = await load();
+    const fast = { ...SELECTION, serviceTier: "fast" } as const;
+    await expect(harness.callRpc("setModel", fast)).resolves.toEqual(fast);
+    await expect(harness.callRpc("getModel")).resolves.toEqual({ selection: fast, saved: true });
+  });
+
   it("rejects an unknown reasoning level", async () => {
     const harness = await load();
     await expect(
