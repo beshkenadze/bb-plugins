@@ -85,14 +85,29 @@ describe("PrewalkButton", () => {
     expect(getPrewalkState("thread:b-cancel")).toBe(IDLE);
   });
 
-  it("drops the result when the composer switched to another thread", async () => {
+  it("drops the result and reports an interrupted run when the composer switched to another thread", async () => {
     let resolve: (value: unknown) => void = () => {};
     const slot = renderButton("b-switch", () => new Promise((done) => (resolve = done)));
     fireEvent.click(slot.getByRole("button", BUTTON));
     await waitFor(() => expect(slot.inspection.rpcCalls).toHaveLength(1));
     await slot.behavior.setComposerScope({ kind: "thread", threadId: "b-other" });
     resolve({ ok: true, text: "Improved" });
-    await waitFor(() => expect(getPrewalkState("thread:b-switch").status).toBe("idle"));
+    await waitFor(() =>
+      expect(getPrewalkState("thread:b-switch")).toEqual({ status: "error", message: expect.stringContaining("interrupted") }),
+    );
+    expect(slot.inspection.composer.text).toBe("fix login");
+  });
+
+  it("reports an interrupted run when the button unmounts mid-run", async () => {
+    const rpc = pendingImprove();
+    const slot = renderButton("b-unmount", rpc.improve);
+    fireEvent.click(slot.getByRole("button", BUTTON));
+    await waitFor(() => expect(slot.inspection.rpcCalls).toHaveLength(1));
+    slot.lifecycle.unmount();
+    rpc.resolvers[0]!({ ok: true, text: "Improved" });
+    await waitFor(() =>
+      expect(getPrewalkState("thread:b-unmount")).toEqual({ status: "error", message: expect.stringContaining("interrupted") }),
+    );
     expect(slot.inspection.composer.text).toBe("fix login");
   });
 
@@ -215,10 +230,10 @@ describe("PrewalkButton", () => {
 
 const banner = customization.banners![0]!;
 
-function renderBanner(threadId: string, text: string) {
+function renderBanner(threadId: string, text: string, cancel: (input: unknown) => unknown = () => ({ cancelled: true })) {
   return renderSlot(banner, {}, {
     composer: { text, scope: { kind: "thread", threadId } },
-    rpc: { cancel: () => ({ cancelled: true }) },
+    rpc: { cancel },
   });
 }
 
@@ -230,6 +245,40 @@ describe("PrewalkBanner", () => {
     fireEvent.click(slot.getByRole("button", { name: "Cancel" }));
     expect(getPrewalkState("thread:n-run")).toBe(IDLE);
     await waitFor(() => expect(slot.inspection.rpcCalls).toEqual([{ method: "cancel", input: { requestId: "req-9" } }]));
+  });
+
+  it("a failed cancel does not clobber a newer run", async () => {
+    const rpc = pendingImprove();
+    const buttonSlot = renderButton("n-cancel-race", rpc.improve);
+    let rejectCancel: (reason: unknown) => void = () => {};
+    const bannerSlot = renderBanner("n-cancel-race", "fix login", () => new Promise((_, reject) => (rejectCancel = reject)));
+    fireEvent.click(buttonSlot.getByRole("button", BUTTON));
+    await waitFor(() => expect(buttonSlot.inspection.rpcCalls).toHaveLength(1));
+    fireEvent.click(bannerSlot.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(bannerSlot.inspection.rpcCalls).toHaveLength(1));
+    fireEvent.click(buttonSlot.getByRole("button", BUTTON));
+    await waitFor(() => expect(buttonSlot.inspection.rpcCalls).toHaveLength(2));
+    const { requestId } = buttonSlot.inspection.rpcCalls[1]!.input as { requestId: string };
+    rejectCancel(new Error("network down"));
+    await settle();
+    expect(getPrewalkState("thread:n-cancel-race")).toEqual({ status: "running", requestId });
+    expect(buttonSlot.inspection.composer.inputLocked).toBe(true);
+    rpc.resolvers[1]!({ ok: true, text: "Improved" });
+    await waitFor(() => expect(buttonSlot.inspection.composer.text).toBe("Improved"));
+  });
+
+  it("reports a failed cancel when nothing else started", async () => {
+    setPrewalkState("thread:n-cancel-fail", { status: "running", requestId: "req-1" });
+    const slot = renderBanner("n-cancel-fail", "fix login", () => {
+      throw new Error("network down");
+    });
+    fireEvent.click(slot.getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(getPrewalkState("thread:n-cancel-fail")).toEqual({
+        status: "error",
+        message: expect.stringContaining("Could not cancel"),
+      }),
+    );
   });
 
   it("restores the original draft", async () => {
@@ -260,5 +309,12 @@ describe("PrewalkBanner", () => {
     expect(slot.getByRole("alert").textContent).toContain("Choose a model.");
     fireEvent.click(slot.getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(slot.queryByRole("alert")).toBeNull());
+  });
+
+  it("shows the full message on hover, since a long one is truncated", () => {
+    const message = "Could not reach the model provider: connection reset by peer";
+    setPrewalkState("thread:n-long", { status: "error", message });
+    const slot = renderBanner("n-long", "fix login");
+    expect(slot.getByText(message).getAttribute("title")).toBe(message);
   });
 });

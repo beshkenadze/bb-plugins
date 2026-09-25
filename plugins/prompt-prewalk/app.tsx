@@ -88,7 +88,10 @@ function PrewalkButton() {
     const current = getPrewalkState(key);
     if (current.status !== "running" || current.requestId !== requestId) return; // cancelled from the banner
     if (!mounted.current || latestKey.current !== key) {
-      setPrewalkState(key, IDLE);
+      setPrewalkState(key, {
+        status: "error",
+        message: "Pre-walk was interrupted because the composer changed. Run it again.",
+      });
       return;
     }
     if (!result.ok) {
@@ -138,7 +141,9 @@ function BannerRow(props: { text: string; action: string; onAction: () => void; 
       role={props.role ?? "status"}
       className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-sm text-muted-foreground"
     >
-      <span className="min-w-0 truncate">{props.text}</span>
+      <span className="min-w-0 truncate" title={props.text}>
+        {props.text}
+      </span>
       <Button type="button" variant="ghost" size="sm" onClick={props.onAction}>
         {props.action}
       </Button>
@@ -164,9 +169,12 @@ function PrewalkBanner() {
       setPrewalkState(key, IDLE);
       rpc
         .call("cancel", { requestId: state.requestId })
-        .catch((error: unknown) =>
-          setPrewalkState(key, { status: "error", message: `Could not cancel: ${errorMessage(error)}` }),
-        );
+        .catch((error: unknown) => {
+          // A newer run may have started meanwhile; do not overwrite it.
+          if (getPrewalkState(key).status === "idle") {
+            setPrewalkState(key, { status: "error", message: `Could not cancel: ${errorMessage(error)}` });
+          }
+        });
     };
     return <BannerRow text="Improving your prompt…" action="Cancel" onAction={cancel} />;
   }
@@ -175,7 +183,7 @@ function PrewalkBanner() {
   }
   if (state.status === "done" && view.draft.text === state.improved) {
     const restore = () => {
-      composer.setText(state.original);
+      composer.updateText((now) => (now === state.improved ? state.original : now));
       setPrewalkState(key, IDLE);
     };
     return <BannerRow text="Prompt improved." action="Restore original" onAction={restore} />;
