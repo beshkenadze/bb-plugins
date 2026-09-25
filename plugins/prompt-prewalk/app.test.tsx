@@ -321,6 +321,55 @@ describe("PrewalkBanner", () => {
 
 const settingsSection = app.settingsSections[0]!;
 const SELECTION = { providerId: "claude-code", model: "claude-haiku-4-5", reasoningLevel: "low" };
+const SAVED = { selection: SELECTION, saved: true };
+const withModel = (model: string) => ({ ...SELECTION, model });
+
+function renderSettings(getModel: () => unknown, setModel: (selection: unknown) => unknown = (selection) => selection) {
+  return renderSlot(settingsSection, {}, { rpc: { getModel, setModel } });
+}
+
+type SettingsSlot = ReturnType<typeof renderSettings>;
+
+/** A handler that answers each call with the next result; an Error result is thrown. */
+function inSequence(...results: unknown[]) {
+  let call = 0;
+  return () => {
+    const result = results[Math.min(call++, results.length - 1)];
+    if (result instanceof Error) throw result;
+    return result;
+  };
+}
+
+/** A promise the test settles by hand (`Promise.withResolvers` is not in ES2022). */
+function deferred() {
+  let resolve: (value: unknown) => void = () => {};
+  let reject: (reason: unknown) => void = () => {};
+  const promise = new Promise<unknown>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+/** A `setModel` handler whose calls stay pending until the test settles them, in call order. */
+function pendingSaves() {
+  const saves: Array<ReturnType<typeof deferred>> = [];
+  const setModel = () => {
+    const save = deferred();
+    saves.push(save);
+    return save.promise;
+  };
+  return { setModel, saves };
+}
+
+async function pickModel(slot: SettingsSlot, model: string): Promise<void> {
+  fireEvent.change(await slot.findByLabelText("Model"), { target: { value: model } });
+  fireEvent.click(slot.getByRole("button", { name: "Apply execution selection" }));
+}
+
+function shownModel(slot: SettingsSlot): string {
+  return (slot.getByLabelText("Model") as HTMLInputElement).value;
+}
 
 describe("ModelSettings", () => {
   it("saves the offered default model on request", async () => {
@@ -354,5 +403,93 @@ describe("ModelSettings", () => {
       rpc: { getModel: () => ({ selection: null, saved: false }) },
     });
     expect(await slot.findByText(/No provider is available/)).toBeTruthy();
+  });
+
+  it("never saves on its own", async () => {
+    const slot = renderSettings(() => ({ selection: SELECTION, saved: false }));
+    await slot.findByLabelText("Model");
+    await settle();
+    expect(slot.inspection.rpcCalls).toEqual([{ method: "getModel", input: null }]);
+  });
+
+  it("shows the latest pick even when an older save answers last", async () => {
+    const rpc = pendingSaves();
+    const slot = renderSettings(() => SAVED, rpc.setModel);
+    await pickModel(slot, "model-b");
+    await pickModel(slot, "model-c");
+    await settle();
+    // Storage sees the writes in click order: C is sent only after B's save settles.
+    expect(slot.inspection.rpcCalls).toEqual([
+      { method: "getModel", input: null },
+      { method: "setModel", input: withModel("model-b") },
+    ]);
+    rpc.saves[0]!.resolve(withModel("model-b"));
+    await waitFor(() => expect(slot.inspection.rpcCalls.at(-1)).toEqual({ method: "setModel", input: withModel("model-c") }));
+    await settle();
+    expect(shownModel(slot)).toBe("model-c");
+    rpc.saves[1]!.resolve(withModel("model-c"));
+    await settle();
+    expect(shownModel(slot)).toBe("model-c");
+  });
+
+  it("reverts to the saved model and shows the error when a save fails", async () => {
+    const slot = renderSettings(
+      () => SAVED,
+      () => {
+        throw new Error("disk full");
+      },
+    );
+    await pickModel(slot, "model-b");
+    expect((await slot.findByRole("alert")).textContent).toBe("disk full");
+    await settle();
+    expect(shownModel(slot)).toBe(SELECTION.model);
+  });
+
+  it("reverts to the last saved pick when a newer save fails", async () => {
+    const rpc = pendingSaves();
+    const slot = renderSettings(() => SAVED, rpc.setModel);
+    await pickModel(slot, "model-b");
+    await pickModel(slot, "model-c");
+    await waitFor(() => expect(rpc.saves.length).toBeGreaterThan(0));
+    rpc.saves[0]!.resolve(withModel("model-b"));
+    await waitFor(() => expect(rpc.saves).toHaveLength(2));
+    rpc.saves[1]!.reject(new Error("disk full"));
+    expect((await slot.findByRole("alert")).textContent).toBe("disk full");
+    await settle();
+    expect(shownModel(slot)).toBe("model-b");
+  });
+
+  it("a stale failed save does not show an error for a newer successful one", async () => {
+    const rpc = pendingSaves();
+    const slot = renderSettings(() => ({ selection: SELECTION, saved: false }), rpc.setModel);
+    await pickModel(slot, "model-b");
+    await pickModel(slot, "model-c");
+    await waitFor(() => expect(rpc.saves.length).toBeGreaterThan(0));
+    rpc.saves[0]!.reject(new Error("disk full"));
+    await waitFor(() => expect(rpc.saves).toHaveLength(2));
+    rpc.saves[1]!.resolve(withModel("model-c"));
+    await waitFor(() => expect(slot.queryByRole("button", { name: "Use this model" })).toBeNull());
+    await settle();
+    expect(slot.queryByRole("alert")).toBeNull();
+    expect(shownModel(slot)).toBe("model-c");
+  });
+
+  it("retries a failed load", async () => {
+    const slot = renderSettings(inSequence(new Error("server down"), SAVED));
+    expect((await slot.findByRole("alert")).textContent).toBe("server down");
+    fireEvent.click(slot.getByRole("button", { name: "Retry" }));
+    expect(await slot.findByLabelText("Model")).toBeTruthy();
+    expect(slot.queryByRole("alert")).toBeNull();
+    expect(slot.inspection.rpcCalls).toEqual([
+      { method: "getModel", input: null },
+      { method: "getModel", input: null },
+    ]);
+  });
+
+  it("retries when no provider was available", async () => {
+    const slot = renderSettings(inSequence({ selection: null, saved: false }, SAVED));
+    await slot.findByText(/No provider is available/);
+    fireEvent.click(slot.getByRole("button", { name: "Retry" }));
+    expect(await slot.findByLabelText("Model")).toBeTruthy();
   });
 });

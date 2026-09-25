@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
   experimental_ProviderModelPicker as ProviderModelPicker,
@@ -192,27 +192,74 @@ function PrewalkBanner() {
   return null;
 }
 
+type ModelState = { selection: ModelSelection | null; saved: boolean };
+
 function ModelSettings() {
   const rpc = useRpc<typeof rpcContract>();
-  const [model, setModel] = useState<{ selection: ModelSelection | null; saved: boolean } | null>(null);
+  const [model, setModel] = useState<ModelState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The last state known to be true on the server: a failed save falls back to it.
+  const confirmed = useRef<ModelState | null>(null);
+  // Saves run one after another in click order, so storage ends with the latest pick.
+  const chain = useRef<Promise<void>>(Promise.resolve());
+  const latestSave = useRef(0);
 
-  useEffect(() => {
-    rpc.call("getModel").then(setModel, (cause: unknown) => setError(errorMessage(cause)));
-  }, [rpc]);
-
-  function save(selection: ModelSelection): void {
+  const load = useCallback(() => {
     setError(null);
-    rpc.call("setModel", selection).then(
-      (saved) => setModel({ selection: saved, saved: true }),
+    rpc.call("getModel").then(
+      (loaded) => {
+        confirmed.current = loaded;
+        setModel(loaded);
+      },
       (cause: unknown) => setError(errorMessage(cause)),
     );
+  }, [rpc]);
+  useEffect(load, [load]);
+
+  function save(selection: ModelSelection): void {
+    const id = ++latestSave.current;
+    setModel((current) => current && { ...current, selection });
+    setError(null);
+    chain.current = chain.current
+      .then(() => rpc.call("setModel", selection))
+      .then(
+        (saved) => {
+          confirmed.current = { selection: saved, saved: true };
+          if (id === latestSave.current) setModel(confirmed.current);
+        },
+        (cause: unknown) => {
+          if (id !== latestSave.current) return;
+          setModel(confirmed.current);
+          setError(errorMessage(cause));
+        },
+      );
   }
 
   const errorLine = error === null ? null : <p role="alert" className="text-sm text-destructive">{error}</p>;
-  if (model === null) return errorLine ?? <p className="text-sm text-muted-foreground">Loading…</p>;
+  const retry = (
+    <Button type="button" variant="outline" size="sm" onClick={load}>
+      Retry
+    </Button>
+  );
+  if (model === null) {
+    if (errorLine === null) return <p className="text-sm text-muted-foreground">Loading…</p>;
+    return (
+      <div className="flex items-center gap-3">
+        {errorLine}
+        {retry}
+      </div>
+    );
+  }
   if (model.selection === null) {
-    return <p className="text-sm text-muted-foreground">No provider is available. Set up a provider in bb first.</p>;
+    return (
+      <div className="flex flex-col gap-2 text-sm">
+        <div className="flex items-center gap-3">
+          <p className="text-muted-foreground">No provider is available. Set up a provider in bb first.</p>
+          {retry}
+        </div>
+        {errorLine}
+      </div>
+    );
   }
   const { selection } = model;
   return (
