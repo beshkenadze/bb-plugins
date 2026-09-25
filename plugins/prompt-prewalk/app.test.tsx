@@ -318,3 +318,41 @@ describe("PrewalkBanner", () => {
     expect(slot.getByText(message).getAttribute("title")).toBe(message);
   });
 });
+
+const settingsSection = app.settingsSections[0]!;
+const SELECTION = { providerId: "claude-code", model: "claude-haiku-4-5", reasoningLevel: "low" };
+
+describe("ModelSettings", () => {
+  it("saves the offered default model on request", async () => {
+    const slot = renderSlot(settingsSection, {}, {
+      rpc: {
+        getModel: () => ({ selection: SELECTION, saved: false }),
+        setModel: (selection: unknown) => selection,
+      },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: "Use this model" }));
+    await waitFor(() => expect(slot.inspection.rpcCalls.at(-1)).toEqual({ method: "setModel", input: SELECTION }));
+    await waitFor(() => expect(slot.queryByRole("button", { name: "Use this model" })).toBeNull());
+  });
+
+  it("saves a selection changed in the picker, service tier included", async () => {
+    const slot = renderSlot(settingsSection, {}, {
+      rpc: {
+        getModel: () => ({ selection: SELECTION, saved: true }),
+        setModel: (selection: unknown) => selection,
+      },
+    });
+    fireEvent.change(await slot.findByLabelText("Service tier"), { target: { value: "fast" } });
+    fireEvent.click(slot.getByRole("button", { name: "Apply execution selection" }));
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls.at(-1)).toEqual({ method: "setModel", input: { ...SELECTION, serviceTier: "fast" } }),
+    );
+  });
+
+  it("explains when no provider is available", async () => {
+    const slot = renderSlot(settingsSection, {}, {
+      rpc: { getModel: () => ({ selection: null, saved: false }) },
+    });
+    expect(await slot.findByText(/No provider is available/)).toBeTruthy();
+  });
+});

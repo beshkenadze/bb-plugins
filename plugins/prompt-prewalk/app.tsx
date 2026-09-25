@@ -1,12 +1,13 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
+  experimental_ProviderModelPicker as ProviderModelPicker,
   useComposer,
   useComposerView,
   useRpc,
   type PluginComposerScope,
 } from "@get-bb/plugin-sdk/app";
-import type { rpcContract } from "./server";
+import type { ModelSelection, rpcContract } from "./server";
 import { MAX_DRAFT_CHARS } from "./worker";
 import {
   getMentionCount,
@@ -191,6 +192,45 @@ function PrewalkBanner() {
   return null;
 }
 
+function ModelSettings() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [model, setModel] = useState<{ selection: ModelSelection | null; saved: boolean } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    rpc.call("getModel").then(setModel, (cause: unknown) => setError(errorMessage(cause)));
+  }, [rpc]);
+
+  function save(selection: ModelSelection): void {
+    setError(null);
+    rpc.call("setModel", selection).then(
+      (saved) => setModel({ selection: saved, saved: true }),
+      (cause: unknown) => setError(errorMessage(cause)),
+    );
+  }
+
+  const errorLine = error === null ? null : <p role="alert" className="text-sm text-destructive">{error}</p>;
+  if (model === null) return errorLine ?? <p className="text-sm text-muted-foreground">Loading…</p>;
+  if (model.selection === null) {
+    return <p className="text-sm text-muted-foreground">No provider is available. Set up a provider in bb first.</p>;
+  }
+  const { selection } = model;
+  return (
+    <div className="flex flex-col gap-3 text-sm">
+      <ProviderModelPicker value={selection} onChange={save} />
+      {model.saved ? null : (
+        <div className="flex items-center gap-3">
+          <span className="text-muted-foreground">Pre-walk stays off until you save a model.</span>
+          <Button type="button" size="sm" onClick={() => save(selection)}>
+            Use this model
+          </Button>
+        </div>
+      )}
+      {errorLine}
+    </div>
+  );
+}
+
 export default definePluginApp((app) => {
   app.composer.customize({
     id: "prewalk",
@@ -200,5 +240,11 @@ export default definePluginApp((app) => {
     richText: {
       onDraftChange: (draft, view) => setMentionCount(scopeKey(view.scope), draft.mentions.length),
     },
+  });
+  app.slots.settingsSection({
+    id: "model",
+    title: "Pre-walk model",
+    description: "The model that rewrites your prompt. It does not depend on the thread's model.",
+    component: ModelSettings,
   });
 });
