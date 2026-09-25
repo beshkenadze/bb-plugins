@@ -797,6 +797,8 @@ git commit -m "feat(prompt-prewalk): improve prompts with a hidden worker thread
 
 ### Task 5: Отмена и `onDispose`
 
+> **Выполнено с фиксами ревью (`68847bd`):** запрос регистрируется в `active` до первого `await`, `finally` удаляет только свою запись, ошибка после отмены ловится одним `catch` на весь `try`. Код ниже — исходный план; актуальное состояние — `server.ts`.
+
 **Files:**
 - Modify: `P/server.ts`
 - Test: `P/server.test.ts` (дописать в конец)
@@ -1183,7 +1185,8 @@ git commit -m "feat(prompt-prewalk): per-composer pre-walk state"
 import { fireEvent, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import { getPrewalkState, setMentionCount } from "./prewalk-store";
+import { act } from "@testing-library/react";
+import { getPrewalkState, IDLE, setMentionCount, setPrewalkState } from "./prewalk-store";
 
 const app = await loadPluginApp(() => import("./app"));
 const customization = app.composerCustomizations[0]!;
@@ -1238,6 +1241,18 @@ describe("PrewalkButton", () => {
     await waitFor(() => expect(getPrewalkState("thread:b-throw")).toEqual({ status: "error", message: "server down" }));
   });
 
+  it("drops the result when the run was cancelled from the banner", async () => {
+    let resolve: (value: unknown) => void = () => {};
+    const slot = renderButton("b-cancel", () => new Promise((done) => (resolve = done)));
+    fireEvent.click(slot.getByRole("button", BUTTON));
+    await waitFor(() => expect(slot.inspection.rpcCalls).toHaveLength(1));
+    act(() => setPrewalkState("thread:b-cancel", IDLE));
+    resolve({ ok: true, text: "Improved" });
+    await waitFor(() => expect(slot.inspection.composer.inputLocked).toBe(false));
+    expect(slot.inspection.composer.text).toBe("fix login");
+    expect(getPrewalkState("thread:b-cancel")).toBe(IDLE);
+  });
+
   it("drops the result when the composer switched to another thread", async () => {
     let resolve: (value: unknown) => void = () => {};
     const slot = renderButton("b-switch", () => new Promise((done) => (resolve = done)));
@@ -1290,6 +1305,7 @@ import {
 import type { rpcContract } from "./server";
 import { MAX_DRAFT_CHARS } from "./worker";
 import {
+  getPrewalkState,
   IDLE,
   scopeKey,
   setMentionCount,
@@ -1349,6 +1365,8 @@ function PrewalkButton() {
       .call("improve", { requestId, text: original, threadId: historyThreadId(view.scope) })
       .catch((error: unknown) => ({ ok: false as const, code: "rpc_error" as const, message: errorMessage(error) }));
     composer.setInputLock(false);
+    const current = getPrewalkState(key);
+    if (current.status !== "running" || current.requestId !== requestId) return; // cancelled from the banner
     if (!mounted.current || latestKey.current !== key) {
       setPrewalkState(key, IDLE);
       return;
@@ -1411,7 +1429,7 @@ git commit -m "feat(prompt-prewalk): composer button that rewrites the draft"
 
 **Step 1: Failing tests**
 
-Дописать в импорт `./prewalk-store` функцию `setPrewalkState`. В конец файла:
+`setPrewalkState` и `IDLE` уже импортированы в задаче 8. В конец файла:
 
 ```tsx
 const banner = customization.banners![0]!;
@@ -1424,11 +1442,12 @@ function renderBanner(threadId: string, text: string) {
 }
 
 describe("PrewalkBanner", () => {
-  it("offers Cancel while running", async () => {
+  it("cancels at once: the run leaves the store and the server is told", async () => {
     setPrewalkState("thread:n-run", { status: "running", requestId: "req-9" });
     const slot = renderBanner("n-run", "fix login");
     expect(slot.getByRole("status").textContent).toContain("Improving your prompt");
     fireEvent.click(slot.getByRole("button", { name: "Cancel" }));
+    expect(getPrewalkState("thread:n-run")).toBe(IDLE);
     await waitFor(() => expect(slot.inspection.rpcCalls).toEqual([{ method: "cancel", input: { requestId: "req-9" } }]));
   });
 
@@ -1489,6 +1508,8 @@ function PrewalkBanner() {
 
   if (state.status === "running") {
     const cancel = () => {
+      // Leaving "running" first makes PrewalkButton drop whatever the server returns for this request.
+      setPrewalkState(key, IDLE);
       rpc
         .call("cancel", { requestId: state.requestId })
         .catch((error: unknown) =>
