@@ -525,6 +525,8 @@ git commit -m "feat(prompt-prewalk): RPC contract and model selection"
 
 ### Task 4: `improve` — worker, история, ошибки, очистка
 
+> **Выполнено с изменением после ревью (`06d2b51`):** worker запускается в `proj_personal` с `environment: { type: "host", workspace: { type: "personal" } }`, вход `improve` — `{ requestId, text, threadId? }` (без `projectId`), `resolveTarget` и `threads.get` удалены. Код ниже — исходный план; актуальное состояние — `server.ts`.
+
 **Files:**
 - Modify: `P/server.ts`
 - Test: `P/server.test.ts` (дописать в конец)
@@ -883,12 +885,15 @@ const CANCELLED = fail("cancelled", "Pre-walk cancelled.");
     active.set(input.requestId, request);
     try {
       const { historyMessages, timeoutSec, extraInstructions } = await settings.get();
-      const target = await resolveTarget(input, historyMessages);
+      const history =
+        input.threadId !== undefined && historyMessages > 0
+          ? collectHistory((await bb.sdk.threads.timeline({ threadId: input.threadId })).rows, historyMessages)
+          : [];
       if (request.cancelled) return CANCELLED;
       const worker = await bb.sdk.threads.spawn({
-        projectId: target.projectId,
-        environment: target.environment,
-        prompt: buildWorkerPrompt({ draft: input.text, history: target.history, extraInstructions }),
+        projectId: PERSONAL_PROJECT_ID,
+        environment: { type: "host", workspace: { type: "personal" } },
+        prompt: buildWorkerPrompt({ draft: input.text, history, extraInstructions }),
         title: "Prompt pre-walk",
         visibility: "hidden",
         permissionMode: "accept-edits",
@@ -1255,19 +1260,13 @@ describe("PrewalkButton", () => {
     await waitFor(() => expect(slot.getByRole("button", BUTTON)).toHaveProperty("disabled", true));
   });
 
-  it("uses the selected project in a new-thread composer and is disabled without one", () => {
-    const withProject = renderSlot(button, {}, {
-      composer: { text: "fix login", scope: { kind: "new-thread", projectId: "p1" } },
+  it("works in a new-thread composer without a thread or a project", () => {
+    const slot = renderSlot(button, {}, {
+      composer: { text: "fix login", scope: { kind: "new-thread", projectId: null } },
       rpc: { improve: () => ({ ok: true, text: "x" }) },
     });
-    fireEvent.click(withProject.getByRole("button", BUTTON));
-    expect(withProject.inspection.rpcCalls[0]).toMatchObject({ input: { projectId: "p1" } });
-    withProject.lifecycle.unmount();
-
-    const withoutProject = renderSlot(button, {}, {
-      composer: { text: "fix login", scope: { kind: "new-thread", projectId: null } },
-    });
-    expect(withoutProject.getByRole("button", BUTTON)).toHaveProperty("disabled", true);
+    fireEvent.click(slot.getByRole("button", BUTTON));
+    expect(slot.inspection.rpcCalls[0]?.input).toEqual({ requestId: expect.any(String), text: "fix login" });
   });
 });
 ```
@@ -1301,12 +1300,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 
-type ImproveTarget = { threadId: string } | { projectId: string };
-
-function improveTarget(scope: PluginComposerScope): ImproveTarget | null {
-  if (scope.kind === "thread") return { threadId: scope.threadId };
-  if (scope.kind === "new-thread" && scope.projectId !== null) return { projectId: scope.projectId };
-  return null;
+/** The worker only needs a thread to read its history; a new-thread draft has none. */
+function historyThreadId(scope: PluginComposerScope): string | undefined {
+  return scope.kind === "thread" ? scope.threadId : undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -1330,30 +1326,27 @@ function PrewalkButton() {
     };
   }, []);
 
-  const target = improveTarget(view.scope);
   const blocker =
-    target === null
-      ? "Pick a project first"
-      : view.draft.text.trim() === ""
-        ? "Write a prompt first"
-        : view.draft.text.length > MAX_DRAFT_CHARS
-          ? `Prompts longer than ${MAX_DRAFT_CHARS} characters are not supported`
-          : mentionCount > 0
-            ? "Remove @-mentions first: pre-walk would turn them into plain text"
-            : view.run.isSubmitting
-              ? "Sending…"
-              : state.status === "running"
-                ? "Pre-walk is running"
-                : null;
+    view.draft.text.trim() === ""
+      ? "Write a prompt first"
+      : view.draft.text.length > MAX_DRAFT_CHARS
+        ? `Prompts longer than ${MAX_DRAFT_CHARS} characters are not supported`
+        : mentionCount > 0
+          ? "Remove @-mentions first: pre-walk would turn them into plain text"
+          : view.run.isSubmitting
+            ? "Sending…"
+            : state.status === "running"
+              ? "Pre-walk is running"
+              : null;
 
   async function run(): Promise<void> {
-    if (target === null || blocker !== null) return;
+    if (blocker !== null) return;
     const original = composer.text;
     const requestId = crypto.randomUUID();
     setPrewalkState(key, { status: "running", requestId });
     composer.setInputLock(true);
     const result = await rpc
-      .call("improve", { requestId, text: original, ...target })
+      .call("improve", { requestId, text: original, threadId: historyThreadId(view.scope) })
       .catch((error: unknown) => ({ ok: false as const, code: "rpc_error" as const, message: errorMessage(error) }));
     composer.setInputLock(false);
     if (!mounted.current || latestKey.current !== key) {
