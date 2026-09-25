@@ -1174,6 +1174,8 @@ git commit -m "feat(prompt-prewalk): per-composer pre-walk state"
 
 ### Task 8: Кнопка ✨ в composer
 
+> **Выполнено с фиксами ревью:** ответ применяется compare-and-set через `composer.updateText` (только если черновик не менялся), блокировка ввода держится эффектом ровно пока в сторе `running` этого scope (lock при старте, release в cleanup), перед записью повторно проверяются @-упоминания, `threadId` передаётся только для thread-scope (`historyInput`), подсказка с причиной — на обёртке `<span title>`. Код ниже — исходный план; актуальное состояние — `app.tsx`.
+
 **Files:**
 - Replace: `P/app.tsx`
 - Test: `P/app.test.tsx`

@@ -47,8 +47,12 @@ export function setPrewalkState(key: string, state: PrewalkState): void {
   notify();
 }
 
+export function getMentionCount(key: string): number {
+  return mentionCounts.get(key) ?? 0;
+}
+
 export function setMentionCount(key: string, count: number): void {
-  if ((mentionCounts.get(key) ?? 0) === count) return;
+  if (getMentionCount(key) === count) return;
   if (count === 0) mentionCounts.delete(key);
   else mentionCounts.set(key, count);
   notify();
@@ -59,5 +63,5 @@ export function usePrewalkState(key: string): PrewalkState {
 }
 
 export function useMentionCount(key: string): number {
-  return useSyncExternalStore(subscribe, () => mentionCounts.get(key) ?? 0);
+  return useSyncExternalStore(subscribe, () => getMentionCount(key));
 }

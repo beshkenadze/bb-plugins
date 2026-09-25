@@ -9,6 +9,7 @@ import {
 import type { rpcContract } from "./server";
 import { MAX_DRAFT_CHARS } from "./worker";
 import {
+  getMentionCount,
   getPrewalkState,
   IDLE,
   scopeKey,
@@ -19,6 +20,8 @@ import {
 } from "./prewalk-store";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
+
+const MENTIONS_BLOCKER = "Remove @-mentions first: pre-walk would turn them into plain text";
 
 /**
  * The worker only needs a thread to read its history; a new-thread draft has none.
@@ -40,7 +43,9 @@ function PrewalkButton() {
   const state = usePrewalkState(key);
   const mentionCount = useMentionCount(key);
   const latestKey = useRef(key);
-  latestKey.current = key;
+  useEffect(() => {
+    latestKey.current = key;
+  }, [key]);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -48,6 +53,13 @@ function PrewalkButton() {
       mounted.current = false;
     };
   }, []);
+  const running = state.status === "running";
+  // `key` re-locks on return to a scope whose run is still going: the SDK drops the lock on a scope change.
+  useEffect(() => {
+    if (!running) return;
+    composer.setInputLock(true);
+    return () => composer.setInputLock(false);
+  }, [composer, key, running]);
 
   const blocker =
     view.draft.text.trim() === ""
@@ -55,10 +67,10 @@ function PrewalkButton() {
       : view.draft.text.length > MAX_DRAFT_CHARS
         ? `Prompts longer than ${MAX_DRAFT_CHARS} characters are not supported`
         : mentionCount > 0
-          ? "Remove @-mentions first: pre-walk would turn them into plain text"
+          ? MENTIONS_BLOCKER
           : view.run.isSubmitting
             ? "Sending…"
-            : state.status === "running"
+            : running
               ? "Pre-walk is running"
               : null;
 
@@ -67,23 +79,39 @@ function PrewalkButton() {
     const original = composer.text;
     const requestId = crypto.randomUUID();
     setPrewalkState(key, { status: "running", requestId });
-    composer.setInputLock(true);
-    const result = await rpc
-      .call("improve", { requestId, text: original, ...historyInput(view.scope) })
-      .catch((error: unknown) => ({ ok: false as const, code: "rpc_error" as const, message: errorMessage(error) }));
-    composer.setInputLock(false);
+    let result;
+    try {
+      result = await rpc.call("improve", { requestId, text: original, ...historyInput(view.scope) });
+    } catch (error) {
+      result = { ok: false as const, code: "rpc_error" as const, message: errorMessage(error) };
+    }
     const current = getPrewalkState(key);
     if (current.status !== "running" || current.requestId !== requestId) return; // cancelled from the banner
     if (!mounted.current || latestKey.current !== key) {
       setPrewalkState(key, IDLE);
       return;
     }
-    if (result.ok) {
-      composer.setText(result.text);
-      setPrewalkState(key, { status: "done", original, improved: result.text });
-    } else {
+    if (!result.ok) {
       setPrewalkState(key, result.code === "cancelled" ? IDLE : { status: "error", message: result.message });
+      return;
     }
+    // The mention count arrives debounced, so a mention typed just before the click is only seen now.
+    if (getMentionCount(key) > 0) {
+      setPrewalkState(key, { status: "error", message: MENTIONS_BLOCKER });
+      return;
+    }
+    let applied = false;
+    composer.updateText((now) => {
+      if (now !== original) return now;
+      applied = true;
+      return result.text;
+    });
+    setPrewalkState(
+      key,
+      applied
+        ? { status: "done", original, improved: result.text }
+        : { status: "error", message: "The draft changed while pre-walk was running, so the result was not applied." },
+    );
   }
 
   // The title sits on a wrapper: Button omits `title`, and a disabled Button has no pointer events.
