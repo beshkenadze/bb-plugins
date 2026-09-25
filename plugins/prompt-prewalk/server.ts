@@ -129,6 +129,17 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       .catch((error: unknown) => bb.log.warn(`stop ${threadId} failed: ${errorMessage(error)}`));
   }
 
+  let sweep: Promise<void> | null = null;
+
+  /** bb.sdk is unavailable while the plugin loads, so the sweep runs before the first request. */
+  function sweepOrphansOnce(): Promise<void> {
+    sweep ??= (async () => {
+      const threads = await bb.sdk.threads.list({ originPluginId: bb.pluginId, includeHidden: true, archived: false });
+      await Promise.all(threads.filter((thread) => thread.visibility === "hidden").map((thread) => disposeWorker(thread.id)));
+    })().catch((error: unknown) => bb.log.warn(`orphan sweep failed: ${errorMessage(error)}`));
+    return sweep;
+  }
+
   async function awaitWorker(workerId: string, timeoutSec: number): Promise<ImproveResult> {
     try {
       await bb.sdk.threads.wait({ threadId: workerId, status: "idle", timeoutMs: timeoutSec * 1000 });
@@ -150,6 +161,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     const request: ActiveRequest = { workerId: null, cancelled: false };
     active.set(input.requestId, request);
     try {
+      await sweepOrphansOnce();
       const selection = await readSelection();
       if (selection === null) return fail("no_model", "Choose a pre-walk model in the Prompt Prewalk settings.");
       const { historyMessages, timeoutSec, extraInstructions } = await settings.get();

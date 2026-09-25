@@ -378,3 +378,45 @@ describe("cancel and dispose", () => {
     expect(argsOf(harness, "threads.archive")).toEqual([{ threadId: "worker-1" }]);
   });
 });
+
+describe("orphan sweep", () => {
+  it("archives and stops hidden orphan workers once, before the first spawn", async () => {
+    const sdk = stubs();
+    sdk.threads.list = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return [
+        { id: "orphan-1", visibility: "hidden" },
+        { id: "visible-1", visibility: "visible" },
+      ];
+    };
+    const harness = await loadWithModel(sdk);
+    await harness.callRpc("improve", THREAD_INPUT);
+    await harness.callRpc("improve", { ...THREAD_INPUT, requestId: "req-2" });
+
+    expect(argsOf(harness, "threads.list")).toEqual([
+      { originPluginId: "prompt-prewalk", includeHidden: true, archived: false },
+    ]);
+    expect(argsOf(harness, "threads.archive")).toEqual([
+      { threadId: "orphan-1" },
+      { threadId: "worker-1" },
+      { threadId: "worker-1" },
+    ]);
+    expect(argsOf(harness, "threads.stop")).toEqual([
+      { threadId: "orphan-1" },
+      { threadId: "worker-1" },
+      { threadId: "worker-1" },
+    ]);
+    const paths = harness.inspection.sdk.calls.map((call) => call.path);
+    expect(paths.indexOf("threads.stop")).toBeLessThan(paths.indexOf("threads.spawn"));
+  });
+
+  it("does not block improve when the sweep fails", async () => {
+    const sdk = stubs();
+    sdk.threads.list = async () => Promise.reject(new Error("list down"));
+    const harness = await loadWithModel(sdk);
+    await expect(harness.callRpc("improve", THREAD_INPUT)).resolves.toMatchObject({ ok: true });
+    expect(harness.inspection.logEntries).toContainEqual(
+      expect.objectContaining({ level: "warn", message: expect.stringContaining("list down") }),
+    );
+  });
+});
