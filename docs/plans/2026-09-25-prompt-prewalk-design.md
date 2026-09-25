@@ -121,3 +121,15 @@ Vitest + `@get-bb/plugin-sdk/testing`, TDD.
 - скрытый тред исчезает после ответа.
 
 **Cross-model review.** Staged diff ревьюит Codex (`codex exec --sandbox read-only`). Каждый принятый фикс получает тест, который падает без фикса.
+
+## Уточнения после сверки с SDK 0.5.9
+
+- Плагин лежит в `plugins/prompt-prewalk/`. Корень репозитория — коллекция плагинов с индексом `.bb/plugins.json`.
+- Scope `new-thread` несёт `projectId` (`null`, пока проект не выбран). Поддерживаем оба scope; при `null` кнопка неактивна.
+- Read-only режима нет. Worker запускается с самым строгим `permissionMode: "accept-edits"`. Если модель всё же попросит разрешение, запрос упрётся в таймаут, и worker остановится.
+- Окружение worker-а: в треде — `{ type: "reuse", environmentId }` этого треда, чтобы не плодить worktree; в новом треде — `project-default`.
+- `threads.wait` бросает `ThreadWaitTimeoutError` и `ThreadWaitUnreachableError`. Они дают коды `timeout` и `worker_failed`.
+- `bb.sdk` недоступен во время загрузки плагина. Поэтому sweep сирот выполняется один раз перед первым `improve`. Сироты — скрытые неархивные треды с `originPluginId` плагина.
+- `useComposerView().draft` не содержит упоминаний. Их число даёт `richText.onDraftChange`. Вместо предупреждения кнопка неактивна, пока в черновике есть @-упоминания: пилюли не теряются молча.
+- `getModel` предлагает модель по умолчанию первого доступного провайдера. `improve` работает только после явного сохранения модели.
+- UI-тексты на английском, как весь интерфейс bb.

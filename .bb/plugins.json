@@ -1,0 +1,6 @@
+{
+  "$schema": "https://getbb.app/schemas/plugins.schema.json",
+  "schemaVersion": 1,
+  "name": "bb-project-plugins",
+  "plugins": [{ "name": "prompt-prewalk", "source": "./plugins/prompt-prewalk" }]
+}
