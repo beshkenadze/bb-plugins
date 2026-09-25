@@ -261,3 +261,45 @@ describe("improve", () => {
     });
   });
 });
+
+describe("cancel and dispose", () => {
+  function blockingStubs() {
+    let release = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sdk = stubs();
+    sdk.threads.wait = async () => {
+      await released;
+      return { matched: true };
+    };
+    sdk.threads.stop = async () => {
+      release();
+      return { ok: true };
+    };
+    return sdk;
+  }
+
+  it("stops the worker and resolves the request as cancelled", async () => {
+    const harness = await loadWithModel(blockingStubs());
+    const pending = harness.callRpc("improve", THREAD_INPUT);
+    await vi.waitFor(() => expect(argsOf(harness, "threads.wait")).toHaveLength(1));
+    await expect(harness.callRpc("cancel", { requestId: "req-1" })).resolves.toEqual({ cancelled: true });
+    await expect(pending).resolves.toMatchObject({ ok: false, code: "cancelled" });
+    expect(argsOf(harness, "threads.archive")).toEqual([{ threadId: "worker-1" }]);
+  });
+
+  it("treats cancel of an unknown request as a no-op", async () => {
+    const harness = await loadWithModel();
+    await expect(harness.callRpc("cancel", { requestId: "nope" })).resolves.toEqual({ cancelled: false });
+  });
+
+  it("stops in-flight workers on dispose", async () => {
+    const harness = await loadWithModel(blockingStubs());
+    const pending = harness.callRpc("improve", THREAD_INPUT).catch(() => undefined);
+    await vi.waitFor(() => expect(argsOf(harness, "threads.wait")).toHaveLength(1));
+    await harness.lifecycle.dispose();
+    expect(argsOf(harness, "threads.stop")).toContainEqual({ threadId: "worker-1" });
+    await pending;
+  });
+});

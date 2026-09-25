@@ -49,7 +49,13 @@ const PERSONAL_PROJECT_ID = "proj_personal";
 type ImproveInput = z.infer<(typeof rpcContract)["improve"]["input"]>;
 type ImproveResult = z.infer<(typeof rpcContract)["improve"]["output"]>;
 
+interface ActiveRequest {
+  workerId: string | null;
+  cancelled: boolean;
+}
+
 const fail = (code: ImproveErrorCode, message: string): ImproveResult => ({ ok: false, code, message });
+const CANCELLED = fail("cancelled", "Pre-walk cancelled.");
 
 function errorName(error: unknown): string {
   return typeof error === "object" && error !== null && "name" in error && typeof error.name === "string"
@@ -85,6 +91,8 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       experimental_multiline: true,
     },
   });
+
+  const active = new Map<string, ActiveRequest>();
 
   async function readSelection(): Promise<ModelSelection | null> {
     const parsed = selectionSchema.safeParse(await bb.storage.kv.get(SELECTION_KEY));
@@ -141,31 +149,52 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   async function improve(input: ImproveInput): Promise<ImproveResult> {
     const selection = await readSelection();
     if (selection === null) return fail("no_model", "Choose a pre-walk model in the Prompt Prewalk settings.");
-    const { historyMessages, timeoutSec, extraInstructions } = await settings.get();
-    const history =
-      input.threadId !== undefined && historyMessages > 0
-        ? collectHistory((await bb.sdk.threads.timeline({ threadId: input.threadId })).rows, historyMessages)
-        : [];
-    const worker = await bb.sdk.threads.spawn({
-      projectId: PERSONAL_PROJECT_ID,
-      environment: { type: "host", workspace: { type: "personal" } },
-      prompt: buildWorkerPrompt({ draft: input.text, history, extraInstructions }),
-      title: "Prompt pre-walk",
-      visibility: "hidden",
-      permissionMode: "accept-edits",
-      pluginMetadata: { prewalk: true },
-      ...selection,
-    });
+    const request: ActiveRequest = { workerId: null, cancelled: false };
+    active.set(input.requestId, request);
     try {
-      return await awaitWorker(worker.id, timeoutSec);
+      const { historyMessages, timeoutSec, extraInstructions } = await settings.get();
+      const history =
+        input.threadId !== undefined && historyMessages > 0
+          ? collectHistory((await bb.sdk.threads.timeline({ threadId: input.threadId })).rows, historyMessages)
+          : [];
+      if (request.cancelled) return CANCELLED;
+      const worker = await bb.sdk.threads.spawn({
+        projectId: PERSONAL_PROJECT_ID,
+        environment: { type: "host", workspace: { type: "personal" } },
+        prompt: buildWorkerPrompt({ draft: input.text, history, extraInstructions }),
+        title: "Prompt pre-walk",
+        visibility: "hidden",
+        permissionMode: "accept-edits",
+        pluginMetadata: { prewalk: true },
+        ...selection,
+      });
+      request.workerId = worker.id;
+      if (request.cancelled) return CANCELLED;
+      const result = await awaitWorker(worker.id, timeoutSec).catch((error: unknown) => {
+        if (request.cancelled) return CANCELLED;
+        throw error;
+      });
+      return request.cancelled ? CANCELLED : result;
     } finally {
-      await disposeWorker(worker.id);
+      active.delete(input.requestId);
+      if (request.workerId !== null) await disposeWorker(request.workerId);
     }
   }
 
   bb.rpc.register(rpcContract, {
     improve,
-    cancel: () => ({ cancelled: false }),
+    cancel: async ({ requestId }) => {
+      const request = active.get(requestId);
+      if (request === undefined) return { cancelled: false };
+      request.cancelled = true;
+      const { workerId } = request;
+      if (workerId !== null) {
+        await bb.sdk.threads
+          .stop({ threadId: workerId })
+          .catch((error: unknown) => bb.log.warn(`stop ${workerId} failed: ${errorMessage(error)}`));
+      }
+      return { cancelled: true };
+    },
     getModel: async () => {
       const saved = await readSelection();
       return saved === null ? { selection: await defaultSelection(), saved: false } : { selection: saved, saved: true };
@@ -174,5 +203,18 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       await bb.storage.kv.set(SELECTION_KEY, selection);
       return selection;
     },
+  });
+
+  bb.onDispose(async () => {
+    const requests = [...active.values()];
+    active.clear();
+    await Promise.all(
+      requests.map(async (request) => {
+        request.cancelled = true;
+        const { workerId } = request;
+        request.workerId = null;
+        if (workerId !== null) await disposeWorker(workerId);
+      }),
+    );
   });
 }
