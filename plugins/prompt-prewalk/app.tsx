@@ -132,11 +132,63 @@ function PrewalkButton() {
   );
 }
 
+function BannerRow(props: { text: string; action: string; onAction: () => void; role?: "status" | "alert" }) {
+  return (
+    <div
+      role={props.role ?? "status"}
+      className="flex items-center justify-between gap-3 rounded-md border border-border bg-muted/40 px-3 py-1.5 text-sm text-muted-foreground"
+    >
+      <span className="min-w-0 truncate">{props.text}</span>
+      <Button type="button" variant="ghost" size="sm" onClick={props.onAction}>
+        {props.action}
+      </Button>
+    </div>
+  );
+}
+
+function PrewalkBanner() {
+  const composer = useComposer();
+  const view = useComposerView();
+  const rpc = useRpc<typeof rpcContract>();
+  const key = scopeKey(view.scope);
+  const state = usePrewalkState(key);
+  const { isEmpty } = view.draft;
+  useEffect(() => {
+    // A sent or cleared draft ends the story: drop a lingering result or error.
+    if (isEmpty && (state.status === "done" || state.status === "error")) setPrewalkState(key, IDLE);
+  }, [isEmpty, key, state.status]);
+
+  if (state.status === "running") {
+    const cancel = () => {
+      // Leaving "running" first makes PrewalkButton drop whatever the server returns for this request.
+      setPrewalkState(key, IDLE);
+      rpc
+        .call("cancel", { requestId: state.requestId })
+        .catch((error: unknown) =>
+          setPrewalkState(key, { status: "error", message: `Could not cancel: ${errorMessage(error)}` }),
+        );
+    };
+    return <BannerRow text="Improving your prompt…" action="Cancel" onAction={cancel} />;
+  }
+  if (state.status === "error") {
+    return <BannerRow role="alert" text={state.message} action="Dismiss" onAction={() => setPrewalkState(key, IDLE)} />;
+  }
+  if (state.status === "done" && view.draft.text === state.improved) {
+    const restore = () => {
+      composer.setText(state.original);
+      setPrewalkState(key, IDLE);
+    };
+    return <BannerRow text="Prompt improved." action="Restore original" onAction={restore} />;
+  }
+  return null;
+}
+
 export default definePluginApp((app) => {
   app.composer.customize({
     id: "prewalk",
     scopes: ["thread", "new-thread"],
     actions: [{ id: "improve", component: PrewalkButton }],
+    banners: [{ id: "status", chrome: "bare", component: PrewalkBanner }],
     richText: {
       onDraftChange: (draft, view) => setMentionCount(scopeKey(view.scope), draft.mentions.length),
     },

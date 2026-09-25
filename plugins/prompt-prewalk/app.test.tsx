@@ -212,3 +212,53 @@ describe("PrewalkButton", () => {
     act(() => setPrewalkState("new-thread", IDLE));
   });
 });
+
+const banner = customization.banners![0]!;
+
+function renderBanner(threadId: string, text: string) {
+  return renderSlot(banner, {}, {
+    composer: { text, scope: { kind: "thread", threadId } },
+    rpc: { cancel: () => ({ cancelled: true }) },
+  });
+}
+
+describe("PrewalkBanner", () => {
+  it("cancels at once: the run leaves the store and the server is told", async () => {
+    setPrewalkState("thread:n-run", { status: "running", requestId: "req-9" });
+    const slot = renderBanner("n-run", "fix login");
+    expect(slot.getByRole("status").textContent).toContain("Improving your prompt");
+    fireEvent.click(slot.getByRole("button", { name: "Cancel" }));
+    expect(getPrewalkState("thread:n-run")).toBe(IDLE);
+    await waitFor(() => expect(slot.inspection.rpcCalls).toEqual([{ method: "cancel", input: { requestId: "req-9" } }]));
+  });
+
+  it("restores the original draft", async () => {
+    setPrewalkState("thread:n-done", { status: "done", original: "fix login", improved: "Better" });
+    const slot = renderBanner("n-done", "Better");
+    fireEvent.click(slot.getByRole("button", { name: "Restore original" }));
+    await waitFor(() => expect(slot.inspection.composer.text).toBe("fix login"));
+    expect(getPrewalkState("thread:n-done").status).toBe("idle");
+  });
+
+  it("hides Restore original after the user edits the improved prompt", () => {
+    setPrewalkState("thread:n-edit", { status: "done", original: "fix login", improved: "Better" });
+    const slot = renderBanner("n-edit", "Better, edited");
+    expect(slot.queryByRole("button", { name: "Restore original" })).toBeNull();
+  });
+
+  it("forgets a finished run once the draft is sent or cleared", async () => {
+    setPrewalkState("thread:n-sent", { status: "error", message: "Choose a model." });
+    const slot = renderBanner("n-sent", "fix login");
+    expect(slot.getByRole("alert")).toBeTruthy();
+    await slot.behavior.setComposerText("");
+    await waitFor(() => expect(getPrewalkState("thread:n-sent")).toBe(IDLE));
+  });
+
+  it("shows an error until dismissed", async () => {
+    setPrewalkState("thread:n-err", { status: "error", message: "Choose a model." });
+    const slot = renderBanner("n-err", "fix login");
+    expect(slot.getByRole("alert").textContent).toContain("Choose a model.");
+    fireEvent.click(slot.getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(slot.queryByRole("alert")).toBeNull());
+  });
+});
