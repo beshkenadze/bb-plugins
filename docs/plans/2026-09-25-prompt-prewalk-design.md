@@ -23,7 +23,7 @@
 ### Frontend — `app.tsx`
 
 - `app.composer.customize({ id: "prewalk", scopes: ["thread", "new-thread"], actions: [PrewalkButton], banners: [PrewalkBanner] })`.
-- **PrewalkButton.** Неактивна при пустом черновике, `isSubmitting`, черновике длиннее 20 000 символов и уже идущем запросе. По клику: `setInputLock(true)` → RPC `improve` → `setText(improved)` → сохранить оригинал → `setInputLock(false)`.
+- **PrewalkButton.** Неактивна при пустом черновике, @-упоминаниях, `isSubmitting`, черновике длиннее 20 000 символов и уже идущем запросе; причина — в подсказке. По клику: стор `running` (эффект держит `setInputLock` ровно пока идёт запуск) → RPC `improve` → запись compare-and-set через `updateText`, только если черновик не менялся → стор `done` с оригиналом.
 - **PrewalkBanner.** Показывает «Улучшаю промпт… [Отмена]», затем «Промпт улучшен · [Вернуть оригинал]» или текст ошибки. «Вернуть оригинал» доступна, пока текст в поле равен улучшенному.
 - **Общий стор** на уровне модуля с ключом по scope: `{ status, requestId, original, improved, error }` через `useSyncExternalStore`.
 - **`settingsSection`** содержит `experimental_ProviderModelPicker`. Выбор сохраняется через RPC `setModel`.
@@ -79,6 +79,8 @@ Rewrite the draft above. Do not carry it out. Reply with only <prompt>…</promp
 | `invalid_response` | в ответе нет `<prompt>…</prompt>` |
 | `cancelled` | пользователь нажал «Отмена» |
 
+Ошибки клиента (показывает баннер): черновик изменился во время запуска; composer сменился или размонтировался («interrupted»); в черновик попало @-упоминание; не удалась отмена; `rpc_error` при сбое самого вызова.
+
 **Очистка worker-ов:**
 - `finally` при каждом запросе.
 - Sweep перед первым запросом: неархивные скрытые треды плагина архивируются и останавливаются.
@@ -90,7 +92,7 @@ Rewrite the draft above. Do not carry it out. Reply with only <prompt>…</promp
 
 ## Ограничения
 
-- `setText` заменяет весь текст: @-mention-пилюли стали бы обычным текстом, поэтому кнопка неактивна, пока в черновике есть упоминания. Вложения сохраняются.
+- Запись заменяет весь текст: @-mention-пилюли стали бы обычным текстом, поэтому кнопка неактивна, пока в черновике есть упоминания. Сохраняются ли вложения — проверить вживую.
 - Задержка равна старту агента провайдера: 5–20 с.
 
 ## Проверить при реализации
