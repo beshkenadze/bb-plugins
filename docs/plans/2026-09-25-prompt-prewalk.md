@@ -1465,6 +1465,14 @@ describe("PrewalkBanner", () => {
     expect(slot.queryByRole("button", { name: "Restore original" })).toBeNull();
   });
 
+  it("forgets a finished run once the draft is sent or cleared", async () => {
+    setPrewalkState("thread:n-sent", { status: "error", message: "Choose a model." });
+    const slot = renderBanner("n-sent", "fix login");
+    expect(slot.getByRole("alert")).toBeTruthy();
+    await slot.behavior.setComposerText("");
+    await waitFor(() => expect(getPrewalkState("thread:n-sent")).toBe(IDLE));
+  });
+
   it("shows an error until dismissed", async () => {
     setPrewalkState("thread:n-err", { status: "error", message: "Choose a model." });
     const slot = renderBanner("n-err", "fix login");
@@ -1505,6 +1513,11 @@ function PrewalkBanner() {
   const rpc = useRpc<typeof rpcContract>();
   const key = scopeKey(view.scope);
   const state = usePrewalkState(key);
+  const { isEmpty } = view.draft;
+  useEffect(() => {
+    // A sent or cleared draft ends the story: drop a lingering result or error.
+    if (isEmpty && (state.status === "done" || state.status === "error")) setPrewalkState(key, IDLE);
+  }, [isEmpty, key, state.status]);
 
   if (state.status === "running") {
     const cancel = () => {
@@ -1755,7 +1768,7 @@ codex exec --sandbox read-only "Review \`git diff HEAD~1..HEAD -- plugins/prompt
 4. В новом треде с выбранным проектом: то же самое.
 5. «Cancel» во время работы: баннер исчезает, черновик не тронут.
 6. `bb thread list` — скрытых «Prompt pre-walk» тредов не осталось.
-7. Черновик с @-упоминанием: кнопка неактивна, в подсказке причина.
+7. Черновик с @-упоминанием: кнопка неактивна, в подсказке причина. Повторить после `bb plugin reload` и после возврата в тред, где черновик с упоминанием уже был: если кнопка активна, значит `richText.onDraftChange` не вызывается при монтировании — тогда хранить число упоминаний как `number | undefined` и считать `undefined` блокирующим.
 8. Проверить, что после `setText` `view.draft.text` совпадает с ответом. Если редактор нормализует текст (перевод строки в конце), «Restore original» не появится — тогда сравнивать через `trimEnd()` и добавить тест.
 9. На реальном треде с несколькими ходами: `threads.timeline` отдаёт строки от старых к новым, и в истории worker-а последняя просьба пользователя не вытеснена промежуточными сообщениями агента.
 10. Worker на Claude Code и на Codex только переписывает черновик и ничего не делает в worktree (`git status` в окружении треда чистый).
