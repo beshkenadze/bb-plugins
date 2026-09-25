@@ -674,11 +674,9 @@ function errorName(error: unknown): string {
     ? error.name
     : "";
 }
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 ```
+
+(`errorMessage` уже добавлен фиксом ревью задачи 3 — не дублировать.)
 
 В начале фабрики, перед `readSelection`, объявить настройки:
 
@@ -1624,12 +1622,7 @@ function ModelSettings() {
   const { selection } = model;
   return (
     <div className="flex flex-col gap-3 text-sm">
-      <ProviderModelPicker
-        value={selection}
-        onChange={({ providerId, model: nextModel, reasoningLevel }) =>
-          save({ providerId, model: nextModel, reasoningLevel })
-        }
-      />
+      <ProviderModelPicker value={selection} onChange={save} />
       {model.saved ? null : (
         <div className="flex items-center gap-3">
           <span className="text-muted-foreground">Pre-walk stays off until you save a model.</span>
@@ -1752,3 +1745,4 @@ codex exec --sandbox read-only "Review \`git diff HEAD~1..HEAD -- plugins/prompt
 8. Проверить, что после `setText` `view.draft.text` совпадает с ответом. Если редактор нормализует текст (перевод строки в конце), «Restore original» не появится — тогда сравнивать через `trimEnd()` и добавить тест.
 9. На реальном треде с несколькими ходами: `threads.timeline` отдаёт строки от старых к новым, и в истории worker-а последняя просьба пользователя не вытеснена промежуточными сообщениями агента.
 10. Worker на Claude Code и на Codex только переписывает черновик и ничего не делает в worktree (`git status` в окружении треда чистый).
+11. Выбрать провайдера, у которого разрешён только режим `full` (например, pi): `threads.spawn` с `permissionMode: "accept-edits"` должен отказать, а не молча поднять режим до `full`. Если поднимает — фильтровать такие провайдеры в `improve` и в `defaultSelection`.
