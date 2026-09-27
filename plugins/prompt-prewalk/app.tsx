@@ -194,11 +194,40 @@ function PrewalkBanner() {
 
 type ModelState = { selection: ModelSelection | null; saved: boolean };
 
+const SETTINGS_QUEUE_WAIT_MS = 15_000;
+const NO_RESPONSE = "Settings did not respond. Try again.";
+
 /**
  * Loads and saves from every settings section run one after another in call order,
  * so storage ends with the latest pick and a reopened section reads it only after earlier saves settle.
  */
 let settingsQueue: Promise<void> = Promise.resolve();
+
+/**
+ * Queues `operation`. The next one starts when it settles or after SETTINGS_QUEUE_WAIT_MS, when `onHang` runs;
+ * the returned promise still settles with the operation.
+ */
+function queueSettings<T>(operation: () => Promise<T>, onHang: () => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    settingsQueue = settingsQueue.then(
+      () =>
+        new Promise<void>((next) => {
+          // A write that hangs past the wait and lands later can still reorder: accepted for liveness.
+          const timer = setTimeout(() => {
+            next();
+            onHang();
+          }, SETTINGS_QUEUE_WAIT_MS);
+          Promise.resolve()
+            .then(operation)
+            .then(resolve, reject)
+            .finally(() => {
+              clearTimeout(timer);
+              next();
+            });
+        }),
+    );
+  });
+}
 
 function ModelSettings() {
   const rpc = useRpc<typeof rpcContract>();
@@ -210,15 +239,17 @@ function ModelSettings() {
 
   const load = useCallback(() => {
     setError(null);
-    settingsQueue = settingsQueue
-      .then(() => rpc.call("getModel"))
-      .then(
-        (loaded) => {
-          confirmed.current = loaded;
-          setModel(loaded);
-        },
-        (cause: unknown) => setError(errorMessage(cause)),
-      );
+    void queueSettings(
+      () => rpc.call("getModel"),
+      () => setError(NO_RESPONSE),
+    ).then(
+      (loaded) => {
+        confirmed.current = loaded;
+        setModel(loaded);
+        setError(null);
+      },
+      (cause: unknown) => setError(errorMessage(cause)),
+    );
   }, [rpc]);
   useEffect(load, [load]);
 
@@ -226,19 +257,24 @@ function ModelSettings() {
     const id = ++latestSave.current;
     setModel((current) => current && { ...current, selection });
     setError(null);
-    settingsQueue = settingsQueue
-      .then(() => rpc.call("setModel", selection))
-      .then(
-        (saved) => {
-          confirmed.current = { selection: saved, saved: true };
-          if (id === latestSave.current) setModel(confirmed.current);
-        },
-        (cause: unknown) => {
-          if (id !== latestSave.current) return;
-          setModel(confirmed.current);
-          setError(errorMessage(cause));
-        },
-      );
+    void queueSettings(
+      () => rpc.call("setModel", selection),
+      () => {
+        if (id === latestSave.current) setError(NO_RESPONSE);
+      },
+    ).then(
+      (saved) => {
+        confirmed.current = { selection: saved, saved: true };
+        if (id !== latestSave.current) return;
+        setModel(confirmed.current);
+        setError(null);
+      },
+      (cause: unknown) => {
+        if (id !== latestSave.current) return;
+        setModel(confirmed.current);
+        setError(errorMessage(cause));
+      },
+    );
   }
 
   const errorLine = error === null ? null : <p role="alert" className="text-sm text-destructive">{error}</p>;

@@ -56,7 +56,7 @@ interface ActiveRequest {
 
 const fail = (code: ImproveErrorCode, message: string): ImproveResult => ({ ok: false, code, message });
 const CANCELLED = fail("cancelled", "Pre-walk cancelled.");
-/** Upper bound on how long dispose waits for in-flight requests, so a hung spawn cannot block a reload. */
+/** Upper bound on how long dispose waits for worker cleanup and in-flight requests, so a hung call cannot block a reload. */
 const DISPOSE_WAIT_MS = 10_000;
 
 function errorName(error: unknown): string {
@@ -231,24 +231,28 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   });
 
   bb.onDispose(async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, DISPOSE_WAIT_MS);
+    });
     const requests = [...active.values()];
     active.clear();
-    await Promise.all(
-      requests.map(async (request) => {
-        request.cancelled = true;
-        const { workerId } = request;
-        request.workerId = null;
-        if (workerId !== null) await disposeWorker(workerId);
-      }),
-    );
-    // A spawn still in flight resolves into a cancelled request, whose own cleanup must run while bb is valid.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      Promise.allSettled([...inflight]),
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, DISPOSE_WAIT_MS);
-      }),
-    ]);
-    clearTimeout(timer);
+    const cleanup = (async () => {
+      await Promise.all(
+        requests.map(async (request) => {
+          request.cancelled = true;
+          const { workerId } = request;
+          request.workerId = null;
+          if (workerId !== null) await disposeWorker(workerId);
+        }),
+      );
+      // A spawn still in flight resolves into a cancelled request, whose own cleanup must run while bb is valid.
+      await Promise.allSettled([...inflight]);
+    })();
+    try {
+      await Promise.race([cleanup, deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
   });
 }

@@ -418,6 +418,35 @@ describe("cancel and dispose", () => {
     spawn.reject(new Error("host gone"));
     await expect(pending).resolves.toMatchObject({ ok: false, code: "cancelled" });
   });
+
+  it("dispose gives up after the deadline even if a known worker's stop hangs", async () => {
+    const wait = deferred<unknown>();
+    const stop = deferred<unknown>();
+    const sdk = stubs();
+    sdk.threads.wait = () => wait.promise;
+    sdk.threads.stop = () => stop.promise;
+    const harness = await loadWithModel(sdk);
+    const pending = harness.callRpc("improve", THREAD_INPUT);
+    await vi.waitFor(() => expect(argsOf(harness, "threads.wait")).toHaveLength(1));
+    vi.useFakeTimers();
+    try {
+      let disposed = false;
+      void harness.lifecycle.dispose().then(() => {
+        disposed = true;
+      });
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(argsOf(harness, "threads.stop")).toEqual([{ threadId: "worker-1" }]);
+      expect(disposed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(disposed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      stop.resolve({ ok: true });
+      wait.resolve({ matched: true });
+    }
+    await expect(pending).resolves.toMatchObject({ ok: false, code: "cancelled" });
+    expect(argsOf(harness, "threads.stop")).toEqual([{ threadId: "worker-1" }]);
+  });
 });
 
 describe("orphan sweep", () => {

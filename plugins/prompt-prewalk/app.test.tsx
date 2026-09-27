@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { getMentionCount, getPrewalkState, IDLE, setMentionCount, setPrewalkState } from "./prewalk-store";
 import { MAX_DRAFT_CHARS } from "./worker";
@@ -362,9 +362,22 @@ function pendingSaves() {
   return { setModel, saves };
 }
 
-async function pickModel(slot: SettingsSlot, model: string): Promise<void> {
-  fireEvent.change(await slot.findByLabelText("Model"), { target: { value: model } });
+/** Picks in a loaded picker without waiting, so it also works under fake timers. */
+function pickLoadedModel(slot: SettingsSlot, model: string): void {
+  fireEvent.change(slot.getByLabelText("Model"), { target: { value: model } });
   fireEvent.click(slot.getByRole("button", { name: "Apply execution selection" }));
+}
+
+async function pickModel(slot: SettingsSlot, model: string): Promise<void> {
+  await slot.findByLabelText("Model");
+  pickLoadedModel(slot, model);
+}
+
+const NO_RESPONSE = "Settings did not respond. Try again.";
+
+/** Advances fake timers inside act; `waitFor` and `findBy*` hang under fake timers. */
+async function advance(ms: number): Promise<void> {
+  await act(() => vi.advanceTimersByTimeAsync(ms));
 }
 
 function shownModel(slot: SettingsSlot): string {
@@ -526,5 +539,79 @@ describe("ModelSettings", () => {
     await slot.findByText(/No provider is available/);
     fireEvent.click(slot.getByRole("button", { name: "Retry" }));
     expect(await slot.findByLabelText("Model")).toBeTruthy();
+  });
+
+  it("a hung load does not block the next settings mount", async () => {
+    const hung = deferred();
+    vi.useFakeTimers();
+    try {
+      const first = renderSettings(() => hung.promise);
+      await advance(14_999);
+      expect(first.queryByRole("alert")).toBeNull();
+      await advance(1);
+      expect(first.getByRole("alert").textContent).toBe(NO_RESPONSE);
+      expect(first.getByRole("button", { name: "Retry" })).toBeTruthy();
+      first.lifecycle.unmount();
+      const second = renderSettings(() => SAVED);
+      await advance(0);
+      expect(second.inspection.rpcCalls).toEqual([{ method: "getModel", input: null }]);
+      expect(shownModel(second)).toBe(SELECTION.model);
+    } finally {
+      vi.useRealTimers();
+      hung.resolve(SAVED);
+    }
+    await settle();
+  });
+
+  it("a hung save does not block later saves", async () => {
+    const rpc = pendingSaves();
+    const slot = renderSettings(() => SAVED, rpc.setModel);
+    await slot.findByLabelText("Model");
+    vi.useFakeTimers();
+    try {
+      pickLoadedModel(slot, "model-b");
+      pickLoadedModel(slot, "model-c");
+      await advance(14_999);
+      expect(rpc.saves).toHaveLength(1);
+      await advance(1);
+      expect(slot.inspection.rpcCalls.at(-1)).toEqual({ method: "setModel", input: withModel("model-c") });
+      // B stalled, but it is no longer the pick on screen.
+      expect(slot.queryByRole("alert")).toBeNull();
+      rpc.saves[1]!.resolve(withModel("model-c"));
+      await advance(0);
+      expect(shownModel(slot)).toBe("model-c");
+      expect(slot.queryByRole("alert")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      for (const save of rpc.saves) save.resolve(withModel("model-b"));
+    }
+    await settle();
+  });
+
+  it("says when a load or save does not respond, and applies a late answer", async () => {
+    const hungLoad = deferred();
+    const rpc = pendingSaves();
+    vi.useFakeTimers();
+    try {
+      const slot = renderSettings(() => hungLoad.promise, rpc.setModel);
+      await advance(15_000);
+      expect(slot.getByRole("alert").textContent).toBe(NO_RESPONSE);
+      hungLoad.resolve(SAVED);
+      await advance(0);
+      expect(shownModel(slot)).toBe(SELECTION.model);
+      expect(slot.queryByRole("alert")).toBeNull();
+      pickLoadedModel(slot, "model-b");
+      await advance(15_000);
+      expect(slot.getByRole("alert").textContent).toBe(NO_RESPONSE);
+      rpc.saves[0]!.resolve(withModel("model-b"));
+      await advance(0);
+      expect(shownModel(slot)).toBe("model-b");
+      expect(slot.queryByRole("alert")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      hungLoad.resolve(SAVED);
+      for (const save of rpc.saves) save.resolve(withModel("model-b"));
+    }
+    await settle();
   });
 });
