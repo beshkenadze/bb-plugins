@@ -56,6 +56,8 @@ interface ActiveRequest {
 
 const fail = (code: ImproveErrorCode, message: string): ImproveResult => ({ ok: false, code, message });
 const CANCELLED = fail("cancelled", "Pre-walk cancelled.");
+/** Upper bound on how long dispose waits for in-flight requests, so a hung spawn cannot block a reload. */
+const DISPOSE_WAIT_MS = 10_000;
 
 function errorName(error: unknown): string {
   return typeof error === "object" && error !== null && "name" in error && typeof error.name === "string"
@@ -93,6 +95,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   });
 
   const active = new Map<string, ActiveRequest>();
+  const inflight = new Set<Promise<ImproveResult>>();
 
   async function readSelection(): Promise<ModelSelection | null> {
     const parsed = selectionSchema.safeParse(await bb.storage.kv.get(SELECTION_KEY));
@@ -158,6 +161,16 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   }
 
   async function improve(input: ImproveInput): Promise<ImproveResult> {
+    const run = runImprove(input);
+    inflight.add(run);
+    try {
+      return await run;
+    } finally {
+      inflight.delete(run);
+    }
+  }
+
+  async function runImprove(input: ImproveInput): Promise<ImproveResult> {
     const request: ActiveRequest = { workerId: null, cancelled: false };
     active.set(input.requestId, request);
     try {
@@ -228,5 +241,14 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
         if (workerId !== null) await disposeWorker(workerId);
       }),
     );
+    // A spawn still in flight resolves into a cancelled request, whose own cleanup must run while bb is valid.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.allSettled([...inflight]),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, DISPOSE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
   });
 }

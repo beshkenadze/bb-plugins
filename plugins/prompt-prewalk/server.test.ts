@@ -377,6 +377,47 @@ describe("cancel and dispose", () => {
     await expect(pending).resolves.toMatchObject({ ok: false, code: "cancelled" });
     expect(argsOf(harness, "threads.archive")).toEqual([{ threadId: "worker-1" }]);
   });
+
+  it("disposing while spawn is pending still archives and stops the late worker", async () => {
+    const spawn = deferred<ReturnType<typeof makeThreadResponse>>();
+    const sdk = stubs();
+    sdk.threads.spawn = () => spawn.promise;
+    const harness = await loadWithModel(sdk);
+    const pending = harness.callRpc("improve", THREAD_INPUT);
+    await vi.waitFor(() => expect(argsOf(harness, "threads.spawn")).toHaveLength(1));
+    const disposing = harness.lifecycle.dispose();
+    // The fake host disposes within microtasks; a real spawn answers later than that.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    spawn.resolve(makeThreadResponse({ id: "worker-1", visibility: "hidden" }));
+    await disposing;
+    expect(argsOf(harness, "threads.archive")).toEqual([{ threadId: "worker-1" }]);
+    expect(argsOf(harness, "threads.stop")).toEqual([{ threadId: "worker-1" }]);
+    await expect(pending).resolves.toMatchObject({ ok: false, code: "cancelled" });
+  });
+
+  it("dispose stops waiting for a hung spawn after 10 s", async () => {
+    const spawn = deferred<ReturnType<typeof makeThreadResponse>>();
+    const sdk = stubs();
+    sdk.threads.spawn = () => spawn.promise;
+    const harness = await loadWithModel(sdk);
+    const pending = harness.callRpc("improve", THREAD_INPUT);
+    await vi.waitFor(() => expect(argsOf(harness, "threads.spawn")).toHaveLength(1));
+    vi.useFakeTimers();
+    try {
+      let disposed = false;
+      void harness.lifecycle.dispose().then(() => {
+        disposed = true;
+      });
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(disposed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(disposed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    spawn.reject(new Error("host gone"));
+    await expect(pending).resolves.toMatchObject({ ok: false, code: "cancelled" });
+  });
 });
 
 describe("orphan sweep", () => {

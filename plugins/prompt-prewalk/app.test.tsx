@@ -432,6 +432,41 @@ describe("ModelSettings", () => {
     expect(shownModel(slot)).toBe("model-c");
   });
 
+  it("saves stay in click order across a settings reopen", async () => {
+    const rpc = pendingSaves();
+    const calls: unknown[] = [];
+    const getModel = () => {
+      calls.push("getModel");
+      return SAVED;
+    };
+    const setModel = (selection: unknown) => {
+      calls.push(selection);
+      return rpc.setModel();
+    };
+    const first = renderSettings(getModel, setModel);
+    await pickModel(first, "model-b");
+    await pickModel(first, "model-c");
+    first.lifecycle.unmount();
+    const second = renderSettings(getModel, setModel);
+    await settle();
+    rpc.saves[0]!.resolve(withModel("model-b"));
+    await waitFor(() => expect(rpc.saves).toHaveLength(2));
+    rpc.saves[1]!.resolve(withModel("model-c"));
+    await pickModel(second, "model-d");
+    await waitFor(() => expect(rpc.saves).toHaveLength(3));
+    rpc.saves[2]!.resolve(withModel("model-d"));
+    await settle();
+    // The reopened section reads storage only after the saves queued before it settle.
+    expect(calls).toEqual([
+      "getModel",
+      withModel("model-b"),
+      withModel("model-c"),
+      "getModel",
+      withModel("model-d"),
+    ]);
+    expect(shownModel(second)).toBe("model-d");
+  });
+
   it("reverts to the saved model and shows the error when a save fails", async () => {
     const slot = renderSettings(
       () => SAVED,

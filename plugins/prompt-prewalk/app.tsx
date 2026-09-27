@@ -194,25 +194,31 @@ function PrewalkBanner() {
 
 type ModelState = { selection: ModelSelection | null; saved: boolean };
 
+/**
+ * Loads and saves from every settings section run one after another in call order,
+ * so storage ends with the latest pick and a reopened section reads it only after earlier saves settle.
+ */
+let settingsQueue: Promise<void> = Promise.resolve();
+
 function ModelSettings() {
   const rpc = useRpc<typeof rpcContract>();
   const [model, setModel] = useState<ModelState | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The last state known to be true on the server: a failed save falls back to it.
   const confirmed = useRef<ModelState | null>(null);
-  // Saves run one after another in click order, so storage ends with the latest pick.
-  const chain = useRef<Promise<void>>(Promise.resolve());
   const latestSave = useRef(0);
 
   const load = useCallback(() => {
     setError(null);
-    rpc.call("getModel").then(
-      (loaded) => {
-        confirmed.current = loaded;
-        setModel(loaded);
-      },
-      (cause: unknown) => setError(errorMessage(cause)),
-    );
+    settingsQueue = settingsQueue
+      .then(() => rpc.call("getModel"))
+      .then(
+        (loaded) => {
+          confirmed.current = loaded;
+          setModel(loaded);
+        },
+        (cause: unknown) => setError(errorMessage(cause)),
+      );
   }, [rpc]);
   useEffect(load, [load]);
 
@@ -220,7 +226,7 @@ function ModelSettings() {
     const id = ++latestSave.current;
     setModel((current) => current && { ...current, selection });
     setError(null);
-    chain.current = chain.current
+    settingsQueue = settingsQueue
       .then(() => rpc.call("setModel", selection))
       .then(
         (saved) => {
