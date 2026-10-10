@@ -4,6 +4,7 @@
   "name": "bb-plugins",
   "plugins": [
     { "name": "prompt-prewalk", "source": "./plugins/prompt-prewalk" },
-    { "name": "prompt-cache", "source": "./plugins/prompt-cache" }
+    { "name": "prompt-cache", "source": "./plugins/prompt-cache" },
+    { "name": "recap", "source": "./plugins/recap" }
   ]
 }

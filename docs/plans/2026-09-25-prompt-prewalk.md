@@ -14,8 +14,8 @@
 
 ## Соглашения
 
-- `P` — `./plugins/prompt-prewalk`. Все команды запускаются из `P`, если не сказано иное.
-- Корень репозитория `.` — коллекция плагинов. Каждый плагин лежит в `plugins/<name>/`.
+- `P` — `plugins/prompt-prewalk` относительно корня checkout. Все команды запускаются из `P`, если не сказано иное.
+- Корень checkout — коллекция плагинов. Каждый плагин лежит в `plugins/<name>/`.
 - Удаление — только `trash <path>`, никаких `rm`.
 - Dev-сервер `bb plugin dev` не запускать. Живая проверка — через `bb plugin build` + `bb plugin install` / `reload`, только после OK пользователя.
 - Сигнатуры SDK сверены по `node_modules/@get-bb/plugin-sdk/bundled-types/*.d.ts`. Если `tsc` не согласен с планом, прав `tsc`: сверься с `.d.ts` и поправь код, не ослабляя тест.
@@ -27,7 +27,7 @@
 **Files:**
 - Delete: `P/skills/example-todos/`
 - Replace: `P/server.ts`, `P/app.tsx`
-- Create: `P/vitest.config.ts`, `./.bb/plugins.json`
+- Create: `P/vitest.config.ts`, `.bb/plugins.json` относительно корня checkout
 - Modify: `P/package.json` (через `npm pkg set` / `npm install`), `P/tsconfig.json`, `docs/plans/2026-09-25-prompt-prewalk-design.md`
 
 **Step 1: Удалить пример todo**
@@ -104,7 +104,7 @@ export default defineConfig({
   ]
 ```
 
-**Step 9: Индекс коллекции плагинов** — `./.bb/plugins.json`
+**Step 9: Индекс коллекции плагинов** — `.bb/plugins.json` относительно корня checkout
 
 ```json
 {
@@ -142,7 +142,7 @@ Expected: `tsc` без ошибок, vitest `No test files found, exiting with c
 **Step 12: Commit** (sandbox off)
 
 ```bash
-cd .
+cd ../..
 git add .bb/plugins.json docs/plans plugins/prompt-prewalk
 git commit -m "chore(prompt-prewalk): scaffold plugin and test tooling"
 ```
@@ -1726,7 +1726,7 @@ Each run spawns one hidden thread titled "Prompt pre-walk". The plugin archives 
 - A run takes as long as the provider needs to start an agent, usually 5–20 s.
 ```
 
-**Step 2: `README.md`** — коротко: назначение, установка из коллекции (`bb plugin install path:$PWD`), настройки, `npm test`, `npm run typecheck`, `bb plugin build`.
+**Step 2: `README.md`** — коротко: назначение, установка из коллекции (`bb plugin install path:$PWD` из папки плагина), настройки, `npm test`, `npm run typecheck`, `bb plugin build`.
 
 **Step 3: `PLUGIN_OVERVIEW.md`** — 3–5 предложений для каталога: что делает кнопка, что модель выбирается отдельно, что ничего не уходит наружу, кроме вызова выбранного провайдера bb.
 
@@ -1753,7 +1753,7 @@ git commit -m "docs(prompt-prewalk): skill, readme, overview"
 **Step 1:** Запустить из корня репозитория:
 
 ```bash
-codex exec --sandbox read-only "Review \`git diff HEAD~1..HEAD -- plugins/prompt-prewalk\` in .. It is a bb plugin: server.ts spawns a hidden worker thread per request and must always archive and stop it; app.tsx adds a composer button and banner. Report only real correctness bugs: races, wrong results, cancellation leaks, leaked worker threads, deadlocks, stale-composer writes, tests that pass for the wrong reason. For each: file:line, failure scenario, fix. 'Nothing found' is a valid answer."
+codex exec --sandbox read-only "Review the latest commit diff for plugins/prompt-prewalk from the repository root. This plugin uses isolated hidden worker threads. Report only concrete correctness bugs: races, cancellation or resource leaks, stale draft writes, deadlocks and tests that pass for the wrong reason. For each give file:line, failure scenario and fix. Nothing found is acceptable. Do not edit code."
 ```
 
 **Step 2:** Оценить каждую находку по коду, а не применять вслепую. Для каждой принятой: падающий тест → фикс → зелёный → commit `fix(prompt-prewalk): …`.
@@ -1764,7 +1764,7 @@ codex exec --sandbox read-only "Review \`git diff HEAD~1..HEAD -- plugins/prompt
 
 Установка меняет рабочий bb пользователя. Спроси разрешение перед Step 1.
 
-1. `bb plugin install path:$PWD --yes`
+1. `bb plugin install path:$PWD --yes` из папки плагина
 2. Settings → Prompt Prewalk: выбрать модель, убедиться, что после сохранения «Use this model» пропадает.
 3. В существующем треде: черновик → ✨ → текст заменён, баннер «Prompt improved», «Restore original» возвращает оригинал.
 4. В новом треде с выбранным проектом: то же самое.

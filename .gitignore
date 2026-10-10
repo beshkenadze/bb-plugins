@@ -7,3 +7,24 @@ dist/
 .claude/
 .serena/
 .kaban/
+
+
+# Private research and local session handoffs
+claudedocs/
+progress.md
+docs/plans/current.md
+
+# Local BB state; the portable plugin index is public
+.bb/*
+!.bb/plugins.json
+
+# Credentials and local package-manager authentication
+.env
+.env.*
+!.env.example
+!.env.*.example
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx

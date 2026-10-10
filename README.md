@@ -8,6 +8,7 @@ this repository by name.
 |---|---|
 | [prompt-prewalk](plugins/prompt-prewalk) | Composer button that rewrites a draft prompt with a separately chosen model |
 | [prompt-cache](plugins/prompt-cache) | Thread header badge and composer banner showing prompt-cache hits and time until the cache expires |
+| [recap](plugins/recap) | Thread-header button that summarizes decisions, completed work, blockers, and next steps with its own provider and model |
 
 ## Install
 
@@ -16,6 +17,7 @@ bb clones the repository and builds the plugin on the server:
 ```sh
 bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin prompt-prewalk
 bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin prompt-cache
+bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin recap
 ```
 
 Installs from a branch track it: `bb plugin outdated` shows new commits and
@@ -32,3 +34,8 @@ npm install
 npm test
 bb plugin install path:$PWD   # or `bb plugin reload <id>` after edits
 ```
+
+
+## License
+
+Original plugin code is [MIT licensed](LICENSE). Copied BB components retain their upstream license and attribution; see [third-party notices](THIRD_PARTY_NOTICES.md).
