@@ -11,13 +11,19 @@ import {
 import {
   cachePhase,
   deriveCache,
+  findRewrites,
   formatCountdown,
   formatTokens,
+  formatUsd,
   hitRate,
+  modelPrice,
+  promptCost,
   usageScope,
   type CacheEventRow,
   type CachePhase,
+  type CacheRewrite,
   type CacheSnapshot,
+  type ModelPrice,
   type RateLimitsInfo,
   type Ttl,
 } from "./cache-model";
@@ -34,12 +40,17 @@ const USAGE_TYPES = ["thread/tokenUsage/updated", ...RESET_TYPES] as const;
 const CONTEXT_TYPES = ["thread/contextWindowUsage/updated", ...RESET_TYPES] as const;
 const CACHE_EVENT_TYPES = [...USAGE_TYPES, CONTEXT_TYPES[0]] as const;
 const RATE_LIMITS_TYPE = "provider/rateLimits/updated";
-const WATCHED_TYPES = new Set<string>([...CACHE_EVENT_TYPES, RATE_LIMITS_TYPE]);
+const REQUESTED_TYPE = "client/turn/requested";
+const WATCHED_TYPES = new Set<string>([...CACHE_EVENT_TYPES, RATE_LIMITS_TYPE, REQUESTED_TYPE]);
 /** Below this context size an expiring cache is not worth a banner. */
 const MIN_BANNER_TOKENS = 20_000;
+/** How many recent usage reports the rewrite count covers. */
+const REWRITE_WINDOW = 20;
 
 interface ThreadCacheData {
   providerId: string;
+  /** The model of the latest turn request, for prices. */
+  model: string | null;
   events: CacheEventRow[];
   rateLimits: RateLimitsInfo | null;
 }
@@ -52,21 +63,55 @@ function isCacheEvent(row: EventRow): row is Extract<EventRow, { type: (typeof C
   return (CACHE_EVENT_TYPES as readonly string[]).includes(row.type);
 }
 
-async function loadThreadCache(sdk: Sdk, threadId: string): Promise<ThreadCacheData> {
+/** Usage report seq → the first sized context report after it. Once found, or once a later report exists, it never changes. */
+type ContextsAfter = Map<number, EventRow | null>;
+
+/** The context after each Claude Code turn, which tells what a turn added from what it wrote again. */
+async function loadContextsAfter(sdk: Sdk, threadId: string, usage: EventRow[], known: ContextsAfter): Promise<EventRow[]> {
+  const reports = usage.filter((row) => row.type === USAGE_TYPES[0]);
+  const found = await Promise.all(
+    reports.map(async (report, index) => {
+      const cached = known.get(report.seq);
+      if (cached !== undefined) return cached;
+      const rows = await sdk.threads.events.list({
+        threadId,
+        types: [CONTEXT_TYPES[0]],
+        afterSeq: String(report.seq),
+        order: "asc",
+        limit: "3",
+      });
+      const next =
+        rows.find((row) => row.type === CONTEXT_TYPES[0] && Boolean(row.data.contextWindowUsage.usedTokens)) ?? null;
+      // The newest report may still get its context; an older one already has whatever it will get.
+      if (next !== null || index > 0) known.set(report.seq, next);
+      return next;
+    }),
+  );
+  return found.filter((row) => row !== null);
+}
+
+async function loadThreadCache(sdk: Sdk, threadId: string, contextsAfter: ContextsAfter): Promise<ThreadCacheData> {
   // Separate queries, so a long turn's many context reports cannot push its latest usage out of a page.
   const latest = (types: readonly [EventRow["type"], ...EventRow["type"][]]) =>
     sdk.threads.events.list({ threadId, types, order: "desc", limit: "1" });
-  const [thread, usage, context, limits] = await Promise.all([
+  const [thread, usage, context, limits, requested] = await Promise.all([
     sdk.threads.get({ threadId }),
-    latest(USAGE_TYPES),
+    // One more than the window: the oldest report is only the baseline of the next.
+    sdk.threads.events.list({ threadId, types: USAGE_TYPES, order: "desc", limit: String(REWRITE_WINDOW + 1) }),
     latest(CONTEXT_TYPES),
     latest([RATE_LIMITS_TYPE]),
+    latest([REQUESTED_TYPE]),
   ]);
+  const after =
+    usageScope(thread.providerId) === "turn" ? await loadContextsAfter(sdk, threadId, usage, contextsAfter) : [];
+  const bySeq = new Map([...usage, ...context, ...after].filter(isCacheEvent).map((row) => [row.seq, row]));
   const rateLimits = limits[0];
+  const request = requested[0];
   return {
     providerId: thread.providerId,
-    // Newest first, as deriveCache reads them.
-    events: [...usage, ...context].filter(isCacheEvent).sort((a, b) => b.seq - a.seq),
+    model: request?.type === REQUESTED_TYPE ? request.data.execution.model : null,
+    // Newest first, as deriveCache and findRewrites read them.
+    events: [...bySeq.values()].sort((a, b) => b.seq - a.seq),
     rateLimits: rateLimits?.type === RATE_LIMITS_TYPE ? rateLimits.data.rateLimits : null,
   };
 }
@@ -87,6 +132,7 @@ function useThreadCache(threadId: string): ThreadCacheData | null {
     let disposed = false;
     let loading = false;
     let queued = false;
+    const contextsAfter: ContextsAfter = new Map();
     async function reload(): Promise<void> {
       if (loading) {
         queued = true;
@@ -96,7 +142,7 @@ function useThreadCache(threadId: string): ThreadCacheData | null {
       do {
         queued = false;
         try {
-          const data = await loadThreadCache(sdk, threadId);
+          const data = await loadThreadCache(sdk, threadId, contextsAfter);
           if (!disposed) setLoaded({ threadId, data });
         } catch (error) {
           // A failed load keeps the last data; a reload queued meanwhile still runs.
@@ -110,6 +156,8 @@ function useThreadCache(threadId: string): ThreadCacheData | null {
       event: "thread:changed",
       threadId,
       callback: (event) => {
+        // A rewritten history may drop the events the cache pointed at.
+        if (event.changes.includes("history-rewritten")) contextsAfter.clear();
         if (touchesCache(event)) void reload();
       },
     });
@@ -149,6 +197,10 @@ interface CacheView {
   settings: CacheSettings;
   phase: CachePhase;
   remainingMs: number;
+  price: ModelPrice | null;
+  /** Rewrites among the recent reports, newest first, and the latest report's own. */
+  rewrites: CacheRewrite[];
+  latestRewrite: CacheRewrite | null;
 }
 
 function useCacheView(threadId: string): CacheView | null {
@@ -156,8 +208,32 @@ function useCacheView(threadId: string): CacheView | null {
   const settings = readSettings(useSettings().values);
   const snapshot = data && deriveCache({ ...data, ttlSetting: ttlSettingFor(settings, data.providerId) });
   const now = useNow(snapshot === null ? 0 : snapshot.lastActivityAt + snapshot.ttl.ms);
-  if (snapshot === null) return null;
-  return { snapshot, settings, ...cachePhase(snapshot, now, settings.warnMs) };
+  if (data === null || snapshot === null) return null;
+  const { rewrites, latest } = findRewrites(data.providerId, data.events);
+  return {
+    snapshot,
+    settings,
+    price: modelPrice(data.model),
+    rewrites,
+    latestRewrite: latest,
+    ...cachePhase(snapshot, now, settings.warnMs),
+  };
+}
+
+/** What sending `tokens` of a `promptTokens` prompt costs at API prices with and without the cache, or null for a model without a known price. */
+function costOf(view: CacheView, tokens: number, promptTokens = tokens): { rewrite: number; warm: number } | null {
+  return view.price && promptCost(view.price, tokens, view.snapshot.ttl.ms, promptTokens);
+}
+
+function rewritesText(view: CacheView): string {
+  const unit = usageScope(view.snapshot.providerId);
+  const window = `in the last ${REWRITE_WINDOW} ${unit}s`;
+  const count = view.rewrites.length;
+  if (count === 0) return `No cache rewrites ${window}.`;
+  const tokens = view.rewrites.reduce((sum, rewrite) => sum + rewrite.tokens, 0);
+  const usd = view.rewrites.reduce((sum, rewrite) => sum + (costOf(view, rewrite.tokens, rewrite.context)?.rewrite ?? 0), 0);
+  const cost = view.price === null ? "" : `, ≈ ${formatUsd(usd)}`;
+  return `${count} cache rewrite${count === 1 ? "" : "s"} ${window}: ${formatTokens(tokens)} tokens${cost}.`;
 }
 
 const PHASE_COLOR: Record<CachePhase, string> = {
@@ -219,11 +295,13 @@ function CompactButton(props: { threadId: string; variant?: "default" | "outline
 }
 
 function CacheDetails(props: { threadId: string; view: CacheView }) {
-  const { snapshot, phase, remainingMs } = props.view;
+  const { snapshot, phase, remainingMs, latestRewrite } = props.view;
   const { usage, ttl, providerId } = snapshot;
   const providers = experimental_useProviders().providers;
   const providerName = providers.find((provider) => provider.id === providerId)?.displayName ?? providerId;
-  const scope = usageScope(providerId) === "turn" ? "Last turn" : "Last request";
+  const unit = usageScope(providerId);
+  const scope = unit === "turn" ? "Last turn" : "Last request";
+  const cost = costOf(props.view, snapshot.contextTokens);
   return (
     <div className="flex flex-col gap-4 text-sm">
       <div className="flex items-baseline justify-between gap-3">
@@ -241,6 +319,11 @@ function CacheDetails(props: { threadId: string; view: CacheView }) {
         </div>
         <Meter total={ttl.ms} segments={[{ value: remainingMs, className: PHASE_COLOR[phase] }]} />
         <p className="text-xs text-muted-foreground">{TTL_SOURCE_TEXT[ttl.source]}</p>
+        {cost !== null && phase !== "expired" ? (
+          <p className="text-xs text-muted-foreground">
+            {`If it expires, the next message costs ≈ ${formatUsd(cost.rewrite)} instead of ≈ ${formatUsd(cost.warm)} (API prices).`}
+          </p>
+        ) : null}
       </section>
       <section className="flex flex-col gap-1.5">
         <div className="flex justify-between gap-3">
@@ -263,11 +346,17 @@ function CacheDetails(props: { threadId: string; view: CacheView }) {
         {providerId === "codex" ? (
           <p className="text-xs text-muted-foreground">OpenAI does not report cache writes.</p>
         ) : null}
+        {latestRewrite !== null ? (
+          <p className="text-xs text-amber-600 dark:text-amber-500">
+            {`This ${unit} sent ${formatTokens(latestRewrite.tokens)} tokens of earlier context again.`}
+          </p>
+        ) : null}
+        <p className="text-xs text-muted-foreground">{rewritesText(props.view)}</p>
       </section>
       {phase === "expired" ? (
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-muted-foreground">
-            {`The next message sends ${formatTokens(snapshot.contextTokens)} tokens without the cache.`}
+            {`The next message sends ${formatTokens(snapshot.contextTokens)} tokens without the cache${cost === null ? "" : `, ≈ ${formatUsd(cost.rewrite)} at API prices`}.`}
           </span>
           <CompactButton threadId={props.threadId} />
         </div>
@@ -356,6 +445,8 @@ function ThreadCacheBanner(props: { threadId: string; running: boolean }) {
   const view = useCacheView(props.threadId);
   if (view === null || !view.settings.banner || props.running) return null;
   const tokens = formatTokens(view.snapshot.contextTokens);
+  const cost = costOf(view, view.snapshot.contextTokens);
+  const price = cost === null ? "" : ` (≈ ${formatUsd(cost.rewrite)})`;
   const row = { threadId: props.threadId, activityAt: view.snapshot.lastActivityAt };
   if (view.phase === "expiring" && view.snapshot.contextTokens >= MIN_BANNER_TOKENS) {
     return (
@@ -363,7 +454,7 @@ function ThreadCacheBanner(props: { threadId: string; running: boolean }) {
         {...row}
         expired={false}
         spoken="Prompt cache expires soon. Reply before it does."
-        text={`Prompt cache expires in ${formatCountdown(view.remainingMs)}. Reply before then, or the next message sends ${tokens} tokens without the cache.`}
+        text={`Prompt cache expires in ${formatCountdown(view.remainingMs)}. Reply before then, or the next message sends ${tokens} tokens without the cache${price}.`}
       />
     );
   }
@@ -373,7 +464,7 @@ function ThreadCacheBanner(props: { threadId: string; running: boolean }) {
         {...row}
         expired
         spoken="Prompt cache expired."
-        text={`Prompt cache expired: the next message sends ${tokens} tokens without the cache. Compact the thread first to send less.`}
+        text={`Prompt cache expired: the next message sends ${tokens} tokens without the cache${price}. Compact the thread first to send less.`}
       />
     );
   }

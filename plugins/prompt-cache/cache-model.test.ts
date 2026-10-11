@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   cachePhase,
   deriveCache,
+  findRewrites,
   formatCountdown,
   formatTokens,
+  formatUsd,
   hitRate,
+  modelPrice,
   normalizeUsage,
+  promptCost,
   resolveTtl,
   usageScope,
   type CacheEventRow,
@@ -22,9 +26,12 @@ function usageRow(createdAt: number, last: Partial<Parameters<typeof normalizeUs
   };
 }
 
-function contextRow(createdAt: number, usedTokens: number | null): CacheEventRow {
-  return { type: "thread/contextWindowUsage/updated", createdAt, data: { contextWindowUsage: { usedTokens } } };
+function contextRow(createdAt: number, usedTokens: number | null, snapshot = false): CacheEventRow {
+  const contextWindowUsage = snapshot ? { usedTokens, snapshot: {} } : { usedTokens };
+  return { type: "thread/contextWindowUsage/updated", createdAt, data: { contextWindowUsage } };
 }
+
+const EMPTY = { inputTokens: 0, cachedInputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 };
 
 describe("normalizeUsage", () => {
   it("adds Claude Code cache reads and writes to the uncached input", () => {
@@ -129,6 +136,21 @@ describe("deriveCache", () => {
     });
   });
 
+  it("skips a turn that made no request, such as a mod's slash command", () => {
+    // Real sequence: /keepwarm answered by cache-watch without calling the model.
+    const events = [
+      contextRow(1_200, 64_104, true),
+      usageRow(1_100, EMPTY),
+      contextRow(1_100, 0),
+      usageRow(1_000, { inputTokens: 6, cachedInputTokens: 63_717, cacheReadInputTokens: 63_656, cacheWriteInputTokens: 61 }),
+    ];
+    expect(deriveCache({ ...base, events })).toMatchObject({
+      usage: { read: 63_656, write: 61 },
+      contextTokens: 64_104,
+      lastActivityAt: 1_000,
+    });
+  });
+
   it("ignores everything before the latest compaction or clear", () => {
     const usage = usageRow(1_000, { inputTokens: 5, cachedInputTokens: 100 });
     expect(deriveCache({ ...base, events: [{ type: "thread/compacted", createdAt: 2_000 }, usage] })).toBeNull();
@@ -144,6 +166,142 @@ describe("deriveCache", () => {
     const events = [usageRow(1_000, { inputTokens: 1, cachedInputTokens: 0 })];
     const rateLimits = { kind: "subscription-window", status: "allowed" };
     expect(deriveCache({ ...base, events, rateLimits })?.ttl).toEqual({ ms: 60 * MIN, source: "subscription" });
+  });
+});
+
+describe("findRewrites", () => {
+  const compacted: CacheEventRow = { type: "thread/compacted", createdAt: 0 };
+
+  it("passes a Claude Code turn that wrote only what it added", () => {
+    // Real numbers: the turn grew the context by 16.6k and wrote 16.9k.
+    const events = [
+      contextRow(4, 112_472),
+      usageRow(3, { inputTokens: 16, cachedInputTokens: 831_274, cacheReadInputTokens: 814_346, cacheWriteInputTokens: 16_928 }),
+      contextRow(2, 95_871),
+      usageRow(1, { inputTokens: 30, cachedInputTokens: 900_000, cacheReadInputTokens: 880_000, cacheWriteInputTokens: 20_000 }),
+    ];
+    expect(findRewrites("claude-code", events)).toEqual({ rewrites: [], latest: null });
+  });
+
+  it("counts a Claude Code turn that wrote the earlier context again", () => {
+    const events = [
+      contextRow(4, 105_000),
+      usageRow(3, { inputTokens: 5, cachedInputTokens: 500_000, cacheReadInputTokens: 396_000, cacheWriteInputTokens: 104_000 }),
+      contextRow(2, 100_000),
+      usageRow(1, { inputTokens: 5, cachedInputTokens: 300_000, cacheReadInputTokens: 295_000, cacheWriteInputTokens: 5_000 }),
+    ];
+    const rewrite = { at: 3, tokens: 99_000, context: 100_000 };
+    expect(findRewrites("claude-code", events)).toEqual({ rewrites: [rewrite], latest: rewrite });
+  });
+
+  it("waits for the context after a Claude Code turn before judging it", () => {
+    const events = [
+      usageRow(3, { inputTokens: 5, cachedInputTokens: 500_000, cacheReadInputTokens: 396_000, cacheWriteInputTokens: 104_000 }),
+      contextRow(2, 100_000),
+      usageRow(1, { inputTokens: 5, cachedInputTokens: 300_000, cacheReadInputTokens: 295_000, cacheWriteInputTokens: 5_000 }),
+    ];
+    expect(findRewrites("claude-code", events).rewrites).toEqual([]);
+  });
+
+  it("keeps older rewrites and leaves latest empty once a later turn read the cache", () => {
+    const events = [
+      contextRow(6, 110_000),
+      usageRow(5, { inputTokens: 5, cachedInputTokens: 600_000, cacheReadInputTokens: 595_000, cacheWriteInputTokens: 5_000 }),
+      contextRow(4, 105_000),
+      usageRow(3, { inputTokens: 5, cachedInputTokens: 500_000, cacheReadInputTokens: 396_000, cacheWriteInputTokens: 104_000 }),
+      contextRow(2, 100_000),
+      usageRow(1, { inputTokens: 5, cachedInputTokens: 300_000, cacheReadInputTokens: 295_000, cacheWriteInputTokens: 5_000 }),
+    ];
+    expect(findRewrites("claude-code", events)).toEqual({ rewrites: [{ at: 3, tokens: 99_000, context: 100_000 }], latest: null });
+  });
+
+  it("does not pair reports across a compaction", () => {
+    const write = { inputTokens: 5, cachedInputTokens: 60_000, cacheReadInputTokens: 0, cacheWriteInputTokens: 60_000 };
+    // The /compact turn itself reports an empty usage after the compaction.
+    const events = [contextRow(5, 60_000), usageRow(4, write), usageRow(3, EMPTY), contextRow(2, 100_000), compacted, usageRow(1, write)];
+    expect(findRewrites("claude-code", events).rewrites).toEqual([]);
+  });
+
+  it("looks through a turn that made no request", () => {
+    const events = [
+      contextRow(7, 105_000, true),
+      usageRow(6, { inputTokens: 5, cachedInputTokens: 105_000, cacheReadInputTokens: 0, cacheWriteInputTokens: 105_000 }),
+      contextRow(5, 100_000, true),
+      usageRow(4, EMPTY),
+      contextRow(3, 0),
+      contextRow(2, 100_000, true),
+      usageRow(1, { inputTokens: 5, cachedInputTokens: 100_000, cacheReadInputTokens: 95_000, cacheWriteInputTokens: 5_000 }),
+    ];
+    expect(findRewrites("claude-code", events).latest).toEqual({ at: 6, tokens: 100_000, context: 100_000 });
+  });
+
+  it("ignores context reports without a size and contexts under 20k", () => {
+    const cold = { inputTokens: 5, cachedInputTokens: 19_000, cacheReadInputTokens: 0, cacheWriteInputTokens: 19_000 };
+    const small = [contextRow(4, 19_500), usageRow(3, cold), contextRow(2, 19_000), usageRow(1, cold)];
+    expect(findRewrites("claude-code", small).rewrites).toEqual([]);
+    const unsized = [contextRow(5, null), usageRow(3, cold), contextRow(2, null), usageRow(1, cold)];
+    expect(findRewrites("claude-code", unsized).rewrites).toEqual([]);
+  });
+
+  it("counts a request that read less than half of the previous prompt", () => {
+    const events = [
+      usageRow(3, { inputTokens: 125_000, cachedInputTokens: 3_000, cacheReadInputTokens: 3_000 }),
+      usageRow(2, { inputTokens: 120_000, cachedInputTokens: 119_000, cacheReadInputTokens: 119_000 }),
+      usageRow(1, { inputTokens: 118_000, cachedInputTokens: 0 }),
+    ];
+    const rewrite = { at: 3, tokens: 117_000, context: 120_000 };
+    expect(findRewrites("codex", events)).toEqual({ rewrites: [rewrite], latest: rewrite });
+  });
+
+  it("passes a smaller request the cache served in full", () => {
+    const events = [
+      usageRow(2, { inputTokens: 60_000, cachedInputTokens: 60_000, cacheReadInputTokens: 60_000 }),
+      usageRow(1, { inputTokens: 120_000, cachedInputTokens: 0 }),
+    ];
+    expect(findRewrites("codex", events).rewrites).toEqual([]);
+  });
+
+  it("tells the newest report from an older one reported in the same millisecond", () => {
+    const events = [
+      usageRow(5, { inputTokens: 102_000, cachedInputTokens: 101_000, cacheReadInputTokens: 101_000 }),
+      usageRow(5, { inputTokens: 101_000, cachedInputTokens: 0 }),
+      usageRow(1, { inputTokens: 100_000, cachedInputTokens: 0 }),
+    ];
+    expect(findRewrites("codex", events)).toMatchObject({ rewrites: [{ at: 5 }], latest: null });
+  });
+});
+
+describe("modelPrice", () => {
+  it("matches a model id to its family, the most specific first", () => {
+    expect(modelPrice("claude-opus-5-5")).toEqual({ input: 4, read: 0.2 });
+    expect(modelPrice("claude-opus-5")).toEqual({ input: 5, read: 0.5 });
+    expect(modelPrice("claude-opus-4-5-20251101")).toEqual({ input: 5, read: 0.5 });
+    expect(modelPrice("claude-opus-4-20250514")).toEqual({ input: 15, read: 1.5 });
+    expect(modelPrice("claude-fable-5-1")).toEqual({ input: 10, read: 0.25 });
+    expect(modelPrice("Claude Sonnet 5.5")).toEqual({ input: 2, read: 0.1 });
+    expect(modelPrice("claude-opus-5-5[1m]")).toEqual({ input: 4, read: 0.2 });
+  });
+
+  it("returns null for an unknown model, an alias, or none", () => {
+    expect(modelPrice("gpt-5.3-codex")).toBeNull();
+    expect(modelPrice("opus")).toBeNull();
+    expect(modelPrice(null)).toBeNull();
+  });
+});
+
+describe("promptCost", () => {
+  it("prices a rewrite at the write rate of the lifetime and a warm turn at the read rate", () => {
+    const opus = modelPrice("claude-opus-5-5")!;
+    expect(promptCost(opus, 100_000, 60 * MIN)).toEqual({ rewrite: 0.8, warm: 0.02 });
+    expect(promptCost(opus, 100_000, 5 * MIN)).toEqual({ rewrite: 0.5, warm: 0.02 });
+  });
+
+  it("uses Haiku 5.5's higher price for prompts over 100k tokens", () => {
+    const haiku = modelPrice("claude-haiku-5-5")!;
+    expect(promptCost(haiku, 100_000, 60 * MIN).rewrite).toBeCloseTo(0.02);
+    expect(promptCost(haiku, 200_000, 60 * MIN).rewrite).toBeCloseTo(0.2);
+    // Part of a larger prompt pays that prompt's tier.
+    expect(promptCost(haiku, 80_000, 5 * MIN, 120_000).rewrite).toBeCloseTo(0.05);
   });
 });
 
@@ -185,5 +343,12 @@ describe("formatting", () => {
     expect(formatCountdown(41_001)).toBe("0:42");
     expect(formatCountdown(0)).toBe("0:00");
     expect(formatCountdown(60 * MIN)).toBe("60:00");
+  });
+
+  it("formats dollars to the cent, whole above $100", () => {
+    expect(formatUsd(0.004)).toBe("<$0.01");
+    expect(formatUsd(0.8)).toBe("$0.80");
+    expect(formatUsd(4.426)).toBe("$4.43");
+    expect(formatUsd(123.4)).toBe("$123");
   });
 });

@@ -19,6 +19,8 @@ interface FakeThread {
   /** Usage, context, compaction and clear events, newest first. */
   events: unknown[];
   rateLimits?: unknown[];
+  /** The model of the latest turn request. */
+  model?: string;
   /** Replaces `threads.get`, to hold or fail a load. */
   get?: () => Promise<unknown>;
 }
@@ -48,19 +50,23 @@ function context(createdAt: number, usedTokens: number) {
 function fakeSdk(thread: FakeThread) {
   const listeners: Array<(event: ThreadChanged) => void> = [];
   const compact = vi.fn(async () => ({ ok: true }));
+  // Like the server: matching types after `afterSeq`, newest first unless `order: "asc"`, cut at `limit`.
+  const list = vi.fn(async (args: { types: string[]; limit?: string; order?: "asc" | "desc"; afterSeq?: string }) => {
+    const requested = thread.model
+      ? [{ type: "client/turn/requested", createdAt: 0, data: { execution: { model: thread.model } } }]
+      : [];
+    const rows = [...thread.events, ...(thread.rateLimits ?? []), ...requested] as Array<{ type: string }>;
+    const matching = rows
+      .map((row, index) => ({ seq: rows.length - index, ...row }))
+      .filter((row) => args.types.includes(row.type))
+      .filter((row) => args.afterSeq === undefined || row.seq > Number(args.afterSeq));
+    if (args.order === "asc") matching.reverse();
+    return args.limit === undefined ? matching : matching.slice(0, Number(args.limit));
+  });
   const sdk = {
     threads: {
       get: () => thread.get?.() ?? Promise.resolve({ providerId: thread.providerId ?? "claude-code" }),
-      events: {
-        // Like the server with `order: "desc"`: matching types, newest first, cut at `limit`.
-        list: async (args: { types: string[]; limit?: string }) => {
-          const rows = [...thread.events, ...(thread.rateLimits ?? [])] as Array<{ type: string }>;
-          const matching = rows
-            .map((row, index) => ({ seq: rows.length - index, ...row }))
-            .filter((row) => args.types.includes(row.type));
-          return args.limit === undefined ? matching : matching.slice(0, Number(args.limit));
-        },
-      },
+      events: { list },
       compact,
     },
     subscribe: (args: { event: string; callback: (event: ThreadChanged) => void }) => {
@@ -69,7 +75,7 @@ function fakeSdk(thread: FakeThread) {
     },
   } as unknown as SdkFakes;
   const push = (event: ThreadChanged) => act(() => listeners.forEach((listener) => listener(event)));
-  return { sdk, compact, push };
+  return { sdk, compact, push, list };
 }
 
 function renderBadge(thread: FakeThread, settings: Record<string, string | number | boolean> = {}) {
@@ -169,6 +175,116 @@ describe("CacheBadge", () => {
     expect(slot.queryByRole("button", { name: "Compact" })).toBeNull();
   });
 
+  it("prices a rewrite against a warm read for a known model", async () => {
+    const { slot } = renderBadge({ events: [usage(NOW - 79_000, 148_000, 2_400, 300)], model: "claude-opus-5-5" });
+    fireEvent.click(await slot.findByRole("button", { name: /from cache/ }));
+    expect(await slot.findByText("If it expires, the next message costs ≈ $0.75 instead of ≈ $0.03 (API prices).")).toBeTruthy();
+  });
+
+  it("shows no prices for a model without a known price", async () => {
+    const { slot } = renderBadge({ events: [usage(NOW - 79_000, 148_000, 2_400, 300)], model: "gpt-5.3-codex" });
+    fireEvent.click(await slot.findByRole("button", { name: /from cache/ }));
+    expect(await slot.findByText("Expires in 3:41")).toBeTruthy();
+    expect(slot.queryByText(/API prices/)).toBeNull();
+  });
+
+  it("flags a turn that sent the earlier context again and counts the rewrites", async () => {
+    const thread: FakeThread = {
+      model: "claude-opus-5-5",
+      events: [
+        context(NOW - MIN, 105_000),
+        usage(NOW - MIN - 1, 395_000, 105_000, 5),
+        context(NOW - 10 * MIN, 100_000),
+        usage(NOW - 11 * MIN, 295_000, 5_000, 5),
+      ],
+    };
+    const { slot } = renderBadge(thread);
+    fireEvent.click(await slot.findByRole("button", { name: /from cache/ }));
+    expect(await slot.findByText("This turn sent 100k tokens of earlier context again.")).toBeTruthy();
+    expect(slot.getByText("1 cache rewrite in the last 20 turns: 100k tokens, ≈ $0.50.")).toBeTruthy();
+  });
+
+  it("says when the recent turns read the cache every time", async () => {
+    const thread: FakeThread = {
+      events: [
+        context(NOW - MIN, 110_000),
+        usage(NOW - MIN - 1, 595_000, 5_000, 5),
+        context(NOW - 10 * MIN, 105_000),
+        usage(NOW - 11 * MIN, 396_000, 5_000, 5),
+      ],
+    };
+    const { slot } = renderBadge(thread);
+    fireEvent.click(await slot.findByRole("button", { name: /from cache/ }));
+    expect(await slot.findByText("No cache rewrites in the last 20 turns.")).toBeTruthy();
+    expect(slot.queryByText(/of earlier context again/)).toBeNull();
+  });
+
+  it("skips an empty context report after a turn when looking for its size", async () => {
+    const thread: FakeThread = {
+      events: [
+        context(NOW - MIN, 105_000),
+        usage(NOW - MIN - 1, 0, 105_000, 5),
+        context(NOW - 10 * MIN, 100_000),
+        context(NOW - 10 * MIN - 1, 0),
+        usage(NOW - 11 * MIN, 95_000, 5_000, 5),
+      ],
+    };
+    const { slot } = renderBadge(thread);
+    fireEvent.click(await slot.findByRole("button", { name: /from cache/ }));
+    expect(await slot.findByText("This turn sent 100k tokens of earlier context again.")).toBeTruthy();
+  });
+
+  it("judges all of the last 20 requests", async () => {
+    // Request 2 of 21 rewrote the cache; it needs request 1 to be judged.
+    const warm = Array.from({ length: 19 }, (_, index) => usage(NOW - MIN - index, 101_005, 1_000, 5));
+    const thread: FakeThread = {
+      providerId: "pi",
+      events: [...warm, usage(NOW - 30 * MIN, 0, 101_000, 5), usage(NOW - 31 * MIN, 0, 100_000, 5)],
+    };
+    const { slot } = renderBadge(thread);
+    fireEvent.click(await slot.findByRole("button", { name: /from cache/ }));
+    expect(await slot.findByText(/^1 cache rewrite in the last 20 requests: 100k tokens/)).toBeTruthy();
+  });
+
+  it("prices a Haiku 5.5 rewrite at the tier of the whole prompt", async () => {
+    const thread: FakeThread = {
+      model: "claude-haiku-5-5",
+      events: [
+        context(NOW - MIN, 120_000),
+        usage(NOW - MIN - 1, 40_000, 80_000, 5),
+        context(NOW - 10 * MIN, 120_000),
+        usage(NOW - 11 * MIN, 115_000, 5_000, 5),
+      ],
+    };
+    const { slot } = renderBadge(thread);
+    fireEvent.click(await slot.findByRole("button", { name: /from cache/ }));
+    expect(await slot.findByText("1 cache rewrite in the last 20 turns: 80k tokens, ≈ $0.05.")).toBeTruthy();
+  });
+
+  it("reprices when a turn asks for another model", async () => {
+    const thread: FakeThread = { events: [usage(NOW - 79_000, 148_000, 2_400, 300)], model: "claude-opus-5-5" };
+    const { slot, push } = renderBadge(thread);
+    fireEvent.click(await slot.findByRole("button", { name: /from cache/ }));
+    expect(await slot.findByText(/costs ≈ \$0\.75 instead/)).toBeTruthy();
+    thread.model = "claude-sonnet-5-5";
+    await push({ changes: ["events-appended"], metadata: { eventTypes: ["client/turn/requested"] } });
+    expect(await slot.findByText(/costs ≈ \$0\.38 instead/)).toBeTruthy();
+  });
+
+  it("looks up the context after each turn once", async () => {
+    const thread: FakeThread = {
+      events: [context(NOW - MIN, 105_000), usage(NOW - MIN - 1, 396_000, 104_000, 5), context(NOW - 10 * MIN, 100_000), usage(NOW - 11 * MIN, 295_000, 5_000, 5)],
+    };
+    const { slot, push, list } = renderBadge(thread);
+    expect(await slot.findByRole("button", { name: /from cache/ })).toBeTruthy();
+    const lookups = () => list.mock.calls.filter(([args]) => args.afterSeq !== undefined).length;
+    const before = lookups();
+    expect(before).toBeGreaterThan(0);
+    await push({ changes: ["events-appended"], metadata: { eventTypes: ["thread/tokenUsage/updated"] } });
+    await settle();
+    expect(lookups()).toBe(before);
+  });
+
   it("offers Compact in the details whenever the cache expired", async () => {
     const { slot, compact } = renderBadge({
       events: [context(NOW - 6 * MIN, 12_000), usage(NOW - 7 * MIN, 9_000, 500, 300)],
@@ -177,6 +293,15 @@ describe("CacheBadge", () => {
     expect(await slot.findByText("The next message sends 12k tokens without the cache.")).toBeTruthy();
     fireEvent.click(slot.getByRole("button", { name: "Compact" }));
     await waitFor(() => expect(compact).toHaveBeenCalledWith({ threadId: "t" }));
+  });
+
+  it("prices the next message once the cache expired", async () => {
+    const { slot } = renderBadge({
+      events: [context(NOW - 6 * MIN, 12_000), usage(NOW - 7 * MIN, 9_000, 500, 300)],
+      model: "claude-opus-5-5",
+    });
+    fireEvent.click(await slot.findByRole("button", { name: /from cache/ }));
+    expect(await slot.findByText("The next message sends 12k tokens without the cache, ≈ $0.06 at API prices.")).toBeTruthy();
   });
 });
 
@@ -188,7 +313,7 @@ describe("CacheBanner", () => {
   it("asks to reply while the cache is about to expire", async () => {
     const { slot } = renderBanner({ events: [usage(NOW - 4 * MIN - 18_000, 148_000, 2_400, 300)] });
     expect(await slot.findByText(/Prompt cache expires in 0:42/)).toBeTruthy();
-    expect(slot.getByText(/sends 151k tokens without the cache/)).toBeTruthy();
+    expect(slot.getByText(/sends 151k tokens without the cache\./)).toBeTruthy();
     expect(slot.getByRole("status").className).not.toContain("text-destructive");
     expect(slot.queryByRole("button", { name: "Compact" })).toBeNull();
   });
@@ -199,6 +324,14 @@ describe("CacheBanner", () => {
     expect(slot.getByRole("status").className).toContain("text-destructive");
     fireEvent.click(slot.getByRole("button", { name: "Compact" }));
     await waitFor(() => expect(compact).toHaveBeenCalledWith({ threadId: "t" }));
+  });
+
+  it("adds the price of the next message for a known model", async () => {
+    const expiring = renderBanner({ events: [usage(NOW - 4 * MIN - 18_000, 148_000, 2_400, 300)], model: "claude-opus-5-5" });
+    expect(await expiring.slot.findByText(/sends 151k tokens without the cache \(≈ \$0\.75\)\./)).toBeTruthy();
+    cleanup();
+    const expired = renderBanner({ events: [usage(NOW - 6 * MIN, 148_000, 2_400, 300)], model: "claude-opus-5-5" });
+    expect(await expired.slot.findByText(/expired: the next message sends 151k tokens without the cache \(≈ \$0\.75\)\./)).toBeTruthy();
   });
 
   it("stays hidden for a warm cache, a small context, a running thread, or the banner turned off", async () => {
