@@ -10,6 +10,7 @@ this repository by name.
 | [prompt-cache](plugins/prompt-cache) | Thread header badge and composer banner showing prompt-cache hits and time until the cache expires |
 | [recap](plugins/recap) | Thread-header button that summarizes decisions, completed work, blockers, and next steps with its own provider and model |
 | [kaban](plugins/kaban) | Project kanban boards, task-linked threads, and the `bb kaban` agent CLI |
+| [thread-manager](plugins/thread-manager) | Restart an agent from its thread header; search, filter, and organize threads across projects with bulk actions |
 
 ## Install
 
@@ -20,6 +21,7 @@ bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin prompt-pre
 bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin prompt-cache
 bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin recap
 bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin kaban
+bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin thread-manager
 ```
 
 Installs from a branch track it: `bb plugin outdated` shows new commits and

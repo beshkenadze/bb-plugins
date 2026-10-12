@@ -6,6 +6,7 @@
     { "name": "prompt-prewalk", "source": "./plugins/prompt-prewalk" },
     { "name": "prompt-cache", "source": "./plugins/prompt-cache" },
     { "name": "recap", "source": "./plugins/recap" },
-    { "name": "kaban", "source": "./plugins/kaban" }
+    { "name": "kaban", "source": "./plugins/kaban" },
+    { "name": "thread-manager", "source": "./plugins/thread-manager" }
   ]
 }

@@ -2,7 +2,7 @@
 
 ## BB UI components
 
-The generated/copied UI components, hooks and helpers under `plugins/*/components/`, `plugins/*/lib/` and `plugins/*/hooks/` originate from the BB plugin registry, as identified by each plugin's `components.json`. Prompt Prewalk references `desktop-v0.43.4`; Prompt Cache, Recap and Kaban reference `desktop-v0.45.0`. They include BB's icon definitions. They retain the upstream MIT license below; the repository's own copyright notice does not replace this notice.
+The generated/copied UI components, hooks and helpers under `plugins/*/components/`, `plugins/*/lib/` and `plugins/*/hooks/` originate from the BB plugin registry, as identified by each plugin's `components.json`. Prompt Prewalk references `desktop-v0.43.4`; Prompt Cache, Recap, Kaban and Thread Manager reference `desktop-v0.45.0`. They include BB's icon definitions. They retain the upstream MIT license below; the repository's own copyright notice does not replace this notice.
 
 Source licenses: [desktop-v0.43.4](https://github.com/get-bb/bb/blob/desktop-v0.43.4/LICENSE) and [desktop-v0.45.0](https://github.com/get-bb/bb/blob/desktop-v0.45.0/LICENSE). Both carry the same notice below.
 
