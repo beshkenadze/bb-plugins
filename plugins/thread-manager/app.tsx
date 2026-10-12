@@ -12,7 +12,7 @@ import { Icon } from "@/components/ui/icon";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import { DEFAULT_FILTERS, filterThreads, isRunning, needsAttention, PAGE_SIZE, selectedOnPage, statusLabel, UNSECTIONED, updateMany } from "./model";
+import { DEFAULT_FILTERS, filterThreads, isRunning, knownFilters, needsAttention, PAGE_SIZE, selectedOnPage, statusLabel, UNSECTIONED, updateMany } from "./model";
 import type { Filters, Lifecycle, Preset, Sort } from "./model";
 import { RestartThreadAction } from "./restart";
 
@@ -113,7 +113,8 @@ function ThreadsPage() {
   const providerNames = useMemo(() => new Map(providers.map((provider) => [provider.id, provider.displayName])), [providers]);
   const projectNames = useMemo(() => new Map(state.projects.map((project) => [project.id, project.name])), [state.projects]);
   const sectionNames = useMemo(() => new Map(state.sections.map((section) => [section.id, section.name])), [state.sections]);
-  const matches = useMemo(() => filterThreads(state.threads, filters, state.projects, state.sections, providerNames), [state.threads, filters, state.projects, state.sections, providerNames]);
+  const applied = useMemo(() => knownFilters(filters, state.threads, state.sections), [filters, state.threads, state.sections]);
+  const matches = useMemo(() => filterThreads(state.threads, applied, state.projects, state.sections, providerNames), [state.threads, applied, state.projects, state.sections, providerNames]);
   const pageCount = Math.max(1, Math.ceil(matches.length / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount - 1);
   const rows = matches.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
@@ -124,6 +125,7 @@ function ThreadsPage() {
   const providerOptions: [string, string][] = [...new Set(state.threads.map((thread) => thread.providerId))].map((id) => [id, providerNames.get(id) ?? id]);
   const hosts = new Map(state.threads.flatMap((thread) => thread.host ? [[thread.host.id, thread.host.name] as const] : []));
   const sectionOptions: [string, string][] = [[UNSECTIONED, "No section"], ...state.sections.map((section): [string, string] => [section.id, section.name])];
+  const destination = sectionOptions.some(([id]) => id === editValue) ? editValue : "";
 
   function changeFilters(patch: Partial<Filters>) {
     setFilters((current) => ({ ...current, ...patch })); setPage(0); setSelectedIds(new Set());
@@ -148,9 +150,13 @@ function ThreadsPage() {
       if (result.failedIds.length) throw new Error(`${result.failedIds.length} failed: ${result.firstError}`);
     });
   }
+  function currentSection(ids: readonly string[]): string {
+    const [only, ...others] = new Set(state.threads.filter((thread) => ids.includes(thread.id)).map((thread) => thread.sectionId ?? UNSECTIONED));
+    return only !== undefined && others.length === 0 ? only : "";
+  }
   function openEdit(next: Edit) {
     setError(null); setEdit(next);
-    setEditValue(next.kind === "rename" ? (next.thread.title ?? next.thread.displayTitle) : UNSECTIONED);
+    setEditValue(next.kind === "rename" ? (next.thread.title ?? next.thread.displayTitle) : currentSection(next.ids));
   }
   async function saveEdit(event: FormEvent) {
     event.preventDefault();
@@ -160,7 +166,8 @@ function ThreadsPage() {
       if (!title) return;
       if (await run(() => actions.rename(edit.thread.id, title), "Thread renamed.")) setEdit(null);
     } else {
-      const sectionId = editValue === UNSECTIONED ? null : editValue;
+      if (!destination) return;
+      const sectionId = destination === UNSECTIONED ? null : destination;
       if (edit.bulk) {
         if (await bulk((thread) => sdk.threads.update({ threadId: thread.id, sectionId }))) setEdit(null);
       } else {
@@ -196,9 +203,9 @@ function ThreadsPage() {
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
         <FilterSelect label="Project" value={filters.projectId} disabled={busy} options={[["", "All projects"], ...state.projects.map((project): [string, string] => [project.id, project.name])]} onChange={(projectId) => changeFilters({ projectId })} />
         <FilterSelect label="Status" value={filters.preset} disabled={busy} options={STATUS_OPTIONS} onChange={(preset) => changeFilters({ preset })} />
-        <FilterSelect label="Provider" value={filters.providerId} disabled={busy} options={[["", "All providers"], ...providerOptions]} onChange={(providerId) => changeFilters({ providerId })} />
-        <FilterSelect label="Machine" value={filters.hostId} disabled={busy} options={[["", "All machines"], ...hosts]} onChange={(hostId) => changeFilters({ hostId })} />
-        <FilterSelect label="Section" value={filters.sectionId} disabled={busy} options={[["", "All sections"], ...sectionOptions]} onChange={(sectionId) => changeFilters({ sectionId })} />
+        <FilterSelect label="Provider" value={applied.providerId} disabled={busy} options={[["", "All providers"], ...providerOptions]} onChange={(providerId) => changeFilters({ providerId })} />
+        <FilterSelect label="Machine" value={applied.hostId} disabled={busy} options={[["", "All machines"], ...hosts]} onChange={(hostId) => changeFilters({ hostId })} />
+        <FilterSelect label="Section" value={applied.sectionId} disabled={busy} options={[["", "All sections"], ...sectionOptions]} onChange={(sectionId) => changeFilters({ sectionId })} />
         <FilterSelect label="Sort" value={filters.sort} disabled={busy} options={SORT_OPTIONS} onChange={(sort) => changeFilters({ sort })} />
       </div>
       <div className="flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
@@ -253,10 +260,10 @@ function ThreadsPage() {
         <DialogDescription>{edit?.kind === "rename" ? "Give this thread a title you can find later." : edit?.bulk ? `Move ${selected.length} selected threads on this page.` : "Choose where this thread appears in the sidebar."}</DialogDescription>
       </DialogHeader><form onSubmit={(event) => { void saveEdit(event); }} className="space-y-4">
         {edit?.kind === "rename" ? <Input autoFocus aria-label="Thread title" value={editValue} disabled={busy} maxLength={500} onChange={(event) => setEditValue(event.target.value)} />
-          : <FilterSelect label="Destination section" value={editValue} options={sectionOptions} disabled={busy} onChange={setEditValue} />}
+          : <FilterSelect label="Destination section" value={destination} options={destination ? sectionOptions : [["", "Choose a section…"], ...sectionOptions]} disabled={busy} onChange={setEditValue} />}
         {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
         <DialogFooter><Button type="button" variant="ghost" disabled={busy} onClick={() => setEdit(null)}>Cancel</Button>
-          <Button type="submit" disabled={busy || (edit?.kind === "rename" && !editValue.trim()) || (edit?.kind === "move" && edit.bulk && selected.length === 0)}>{busy ? "Saving…" : "Save"}</Button>
+          <Button type="submit" disabled={busy || (edit?.kind === "rename" && !editValue.trim()) || (edit?.kind === "move" && (!destination || (edit.bulk && selected.length === 0)))}>{busy ? "Saving…" : "Save"}</Button>
         </DialogFooter>
       </form></DialogContent>
     </Dialog>

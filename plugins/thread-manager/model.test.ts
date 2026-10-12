@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_FILTERS, filterThreads, selectedOnPage, statusLabel, UNSECTIONED, updateMany } from "./model";
+import { DEFAULT_FILTERS, filterThreads, knownFilters, selectedOnPage, statusLabel, UNSECTIONED, updateMany } from "./model";
 import { projects, sections, thread } from "./test/fixtures";
 
 const names = new Map([["codex", "Codex"]]);
@@ -28,6 +28,13 @@ describe("thread search and scope", () => {
     expect(filter(rows)).toEqual(["a", "z"]);
     expect(filter(rows, { sort: "title" })).toEqual(["a", "z"]);
     expect(rows.map((row) => row.id)).toEqual(["z", "a"]);
+  });
+  it("drops a provider, machine, or section filter once no option shows it", () => {
+    const set = { ...DEFAULT_FILTERS, providerId: "pi", hostId: "old-box", sectionId: "deleted" };
+    expect(knownFilters(set, [thread("a")], sections)).toEqual(DEFAULT_FILTERS);
+    const kept = { ...DEFAULT_FILTERS, providerId: "codex", hostId: "mac", sectionId: "later" };
+    expect(knownFilters(kept, [thread("a")], sections)).toEqual(kept);
+    expect(knownFilters({ ...DEFAULT_FILTERS, sectionId: UNSECTIONED }, [], []).sectionId).toBe(UNSECTIONED);
   });
 });
 

@@ -63,6 +63,16 @@ export function statusLabel(thread: PluginSidebarThread): string {
   }
 }
 
+/** Clears a provider, machine, or section filter whose dropdown option is gone, so the list matches what the dropdowns show. */
+export function knownFilters(filters: Filters, threads: readonly PluginSidebarThread[], sections: readonly PluginSidebarSection[]): Filters {
+  return {
+    ...filters,
+    providerId: threads.some((thread) => thread.providerId === filters.providerId) ? filters.providerId : "",
+    hostId: threads.some((thread) => thread.host?.id === filters.hostId) ? filters.hostId : "",
+    sectionId: filters.sectionId === UNSECTIONED || sections.some((section) => section.id === filters.sectionId) ? filters.sectionId : "",
+  };
+}
+
 export function filterThreads(
   threads: readonly PluginSidebarThread[],
   filters: Filters,

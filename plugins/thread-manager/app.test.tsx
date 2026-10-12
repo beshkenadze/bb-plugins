@@ -53,6 +53,21 @@ describe("Thread Manager", () => {
     expect(update).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(slot.queryByRole("dialog")).toBeNull());
   });
+  it("starts a move from the threads' current section, not from No section", async () => {
+    const update = vi.fn(async ({ threadId }: { threadId: string }) => makeThreadResponse({ id: threadId }));
+    const slot = mount([thread("Filed", { sectionId: "later" }), thread("Loose")], { sdk: { threads: { update } } });
+    openMenu(slot, "Filed");
+    fireEvent.click(await slot.findByRole("menuitem", { name: "Move to section" }));
+    expect((slot.getByRole("combobox", { name: "Destination section" }) as HTMLSelectElement).value).toBe("later");
+    fireEvent.click(slot.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(slot.getByRole("checkbox", { name: "Select this page" }));
+    fireEvent.click(within(slot.getByRole("toolbar")).getByRole("button", { name: "Move to section" }));
+    expect((slot.getByRole("combobox", { name: "Destination section" }) as HTMLSelectElement).value).toBe("");
+    expect(slot.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.submit(slot.getByRole("combobox", { name: "Destination section" }).closest("form")!);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(update).not.toHaveBeenCalled();
+  });
   it("keeps only failed bulk moves selected and explains the failure", async () => {
     const slot = mount(undefined, { sdk: { threads: { update: async ({ threadId }) => {
       if (threadId === "Two") throw new Error("Offline");
@@ -60,6 +75,7 @@ describe("Thread Manager", () => {
     } } } });
     fireEvent.click(slot.getByRole("checkbox", { name: "Select this page" }));
     fireEvent.click(within(slot.getByRole("toolbar")).getByRole("button", { name: "Move to section" }));
+    fireEvent.change(slot.getByRole("combobox", { name: "Destination section" }), { target: { value: "later" } });
     fireEvent.click(slot.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(slot.getAllByRole("alert")[0]?.textContent).toContain("1 failed: Offline"));
     expect(slot.getByRole("dialog")).toBeTruthy();
