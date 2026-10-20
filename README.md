@@ -11,6 +11,7 @@ this repository by name.
 | [recap](plugins/recap) | Thread-header button that summarizes decisions, completed work, blockers, and next steps with its own provider and model |
 | [kaban](plugins/kaban) | Project kanban boards, task-linked threads, and the `bb kaban` agent CLI |
 | [thread-manager](plugins/thread-manager) | Restart an agent from its thread header; search, filter, and organize threads across projects with bulk actions |
+| [project-switcher](plugins/project-switcher) | Searchable, alphabetical project dropdown at the top of the sidebar that opens the chosen project's first thread |
 
 ## Install
 
@@ -22,6 +23,7 @@ bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin prompt-cac
 bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin recap
 bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin kaban
 bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin thread-manager
+bb plugin install git:github.com/beshkenadze/bb-plugins@main --plugin project-switcher
 ```
 
 Installs from a branch track it: `bb plugin outdated` shows new commits and

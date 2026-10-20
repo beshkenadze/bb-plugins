@@ -7,6 +7,7 @@
     { "name": "prompt-cache", "source": "./plugins/prompt-cache" },
     { "name": "recap", "source": "./plugins/recap" },
     { "name": "kaban", "source": "./plugins/kaban" },
-    { "name": "thread-manager", "source": "./plugins/thread-manager" }
+    { "name": "thread-manager", "source": "./plugins/thread-manager" },
+    { "name": "project-switcher", "source": "./plugins/project-switcher" }
   ]
 }
